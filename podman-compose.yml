@@ -1,0 +1,9 @@
+services:
+  amr-health:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: AMR-Health
+    ports:
+      - "8088:80"
+    restart: unless-stopped
