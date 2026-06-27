@@ -1,5 +1,5 @@
 const STORAGE_KEY = "drishti-amr-health-v1";
-const RDS_PLANT_HOSTS = { Shelbyville: "10.205.22.12", Springfield: "10.222.10.76" };
+const RDS_PLANT_HOSTS = { Shelbyville: "10.205.22.12", Springfield: "10.222.10.76", Hopkinsville: "10.216.4.59" };
 const topics = [
   "Robot offline / disconnect", "Application crash", "Ubuntu server reboot", "Ubuntu server shutdown", "Ubuntu log gap",
   "VM stopped", "VM started", "VM reboot", "VM killed by OOM", "Host memory exhaustion", "Swap full",
@@ -87,6 +87,7 @@ function loadState() {
 }
 function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 function unique(values) { return [...new Set(values.filter(Boolean))].sort(); }
+function knownPlantNames() { return unique([...state.plants.map((plant) => plant.name), ...state.amrs.map((amr) => amr.plant), ...state.logs.map((log) => log.plant), ...state.wifiPoints.map((point) => point.plant), ...Object.keys(RDS_PLANT_HOSTS)]); }
 function matchFilter(filter, value) { return filter === "All" || filter === value; }
 function countBy(items, key) { return items.reduce((acc, item) => { acc[item[key]] = (acc[item[key]] || 0) + 1; return acc; }, {}); }
 function escapeHtml(value) { return String(value).replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char])); }
@@ -135,11 +136,12 @@ function setOptions(select, options, current = "All") {
 }
 function populateGlobalFilters() {
   const current = $("#globalPlantFilter").value || "All";
-  setOptions($("#globalPlantFilter"), ["All", ...state.plants.map((plant) => plant.name)], current);
+  const plantOptions = knownPlantNames();
+  setOptions($("#globalPlantFilter"), ["All", ...plantOptions], current);
   const amrSelect = $('#amrForm select[name="plant"]');
   setOptions(amrSelect, state.plants.map((plant) => plant.name), amrSelect.value || state.plants[0]?.name);
   const rdsImportPlant = $("#rdsImportPlant");
-  if (rdsImportPlant) setOptions(rdsImportPlant, state.plants.map((plant) => plant.name), rdsImportPlant.value || "Shelbyville");
+  if (rdsImportPlant) setOptions(rdsImportPlant, plantOptions, rdsImportPlant.value || "Shelbyville");
 }
 function filteredAmrs() { return state.amrs.filter((amr) => plantMatches(amr.plant) && textMatches(amr)); }
 function renderMetrics(target, rows) {

@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("Shelbyville", "Springfield")]
+  [ValidateSet("Shelbyville", "Springfield", "Hopkinsville")]
   [string]$Plant = "Shelbyville",
   [string]$BaseUrl = "",
   [string]$OutDir = "data/rds-snapshots",
@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $knownPlants = @{
   Shelbyville = "http://10.205.22.12:8080"
   Springfield = "http://10.222.10.76:8080"
+  Hopkinsville = "http://10.216.4.59:8080"
 }
 
 if (-not $BaseUrl) {

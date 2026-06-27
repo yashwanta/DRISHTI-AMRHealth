@@ -181,6 +181,7 @@ Helper scripts are available:
 ```powershell
 .\scripts\pull-rds-core.ps1 -Plant Shelbyville
 .\scripts\pull-rds-core.ps1 -Plant Springfield
+.\scripts\pull-rds-core.ps1 -Plant Hopkinsville
 .\scripts\pull-shelbyville-rds.ps1
 .\scripts\pull-shelbyville-rds.ps1 -IncludeScene
 ```
@@ -197,3 +198,12 @@ Springfield uses the same RDS core contract:
 
 The Springfield import path uses the same parser as Shelbyville. Select `Springfield` in Admin before importing a Springfield core JSON file so AMRs, positions, and logs are labeled correctly.
 
+## Hopkinsville RDS Core Endpoint
+
+Hopkinsville uses the same RDS core contract:
+
+- Base URL: `http://10.216.4.59:8080`
+- Core feed: `GET /api/agv-report/core`
+- Response: JSON with `data.report[]`, `data.model_md5`, `data.scene_md5`, and alarm arrays.
+
+The Hopkinsville import path uses the same parser as Shelbyville and Springfield. Select `Hopkinsville` in Admin before importing a Hopkinsville core JSON file so AMRs, positions, and logs are labeled correctly.
