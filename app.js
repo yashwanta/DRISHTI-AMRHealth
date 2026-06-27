@@ -1,4 +1,5 @@
 const STORAGE_KEY = "drishti-amr-health-v1";
+const RDS_PLANT_HOSTS = { Shelbyville: "10.205.22.12", Springfield: "10.222.10.76" };
 const topics = [
   "Robot offline / disconnect", "Application crash", "Ubuntu server reboot", "Ubuntu server shutdown", "Ubuntu log gap",
   "VM stopped", "VM started", "VM reboot", "VM killed by OOM", "Host memory exhaustion", "Swap full",
@@ -92,6 +93,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>"]/g, (char) => (
 function escapeAttr(value) { return escapeHtml(value).replace(/'/g, "&#39;"); }
 function badge(value) { const klass = String(value).toLowerCase().replace(/\s+/g, "-"); return `<span class="badge ${klass}">${escapeHtml(value)}</span>`; }
 function formatTime(value) { return new Date(value).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
+function rdsHostForPlant(plant) { return RDS_PLANT_HOSTS[plant] || "RDS host not configured"; }
 
 function init() {
   bindNavigation();
@@ -136,6 +138,8 @@ function populateGlobalFilters() {
   setOptions($("#globalPlantFilter"), ["All", ...state.plants.map((plant) => plant.name)], current);
   const amrSelect = $('#amrForm select[name="plant"]');
   setOptions(amrSelect, state.plants.map((plant) => plant.name), amrSelect.value || state.plants[0]?.name);
+  const rdsImportPlant = $("#rdsImportPlant");
+  if (rdsImportPlant) setOptions(rdsImportPlant, state.plants.map((plant) => plant.name), rdsImportPlant.value || "Shelbyville");
 }
 function filteredAmrs() { return state.amrs.filter((amr) => plantMatches(amr.plant) && textMatches(amr)); }
 function renderMetrics(target, rows) {
@@ -311,7 +315,8 @@ function normalizeRdsCoreResponse(payload, plant = "Shelbyville") {
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
   const scale = (value, min, max) => max === min ? 50 : 10 + ((Number(value) - min) / (max - min)) * 80;
   const importedAt = new Date().toISOString();
-  const source = "Shelbyville RDS Core";
+  const source = `${plant} RDS Core`;
+  const rdsHost = rdsHostForPlant(plant);
   const amrs = reports.map((item) => {
     const rbk = item.rbk_report || {};
     const basic = item.basic_info || {};
@@ -392,28 +397,31 @@ function normalizeRdsCoreResponse(payload, plant = "Shelbyville") {
     };
   });
   const logs = [];
-  [...(core.warnings || []), ...(core.alarms?.warnings || [])].forEach((warning, index) => logs.push({
+  const pushCoreLog = (entry, severity, topic, fallback) => logs.push({
     time: core.create_on || importedAt,
     plant,
-    amr: warning.desc?.match(/\[(.*?)\]/)?.[1] || "RDS Core",
-    server: "10.205.22.12",
-    host: "Shelbyville RDS",
+    amr: entry.desc?.match(/\[(.*?)\]/)?.[1] || entry.desc?.match(/(AMR-[0-9]+)/)?.[1] || "RDS Core",
+    server: rdsHost,
+    host: `${plant} RDS`,
     vm: "",
     source: "RDS Core",
     category: "RDS",
-    severity: "High",
-    topic: "RDS Core issue",
-    message: warning.desc || warning.describe || `RDS warning ${warning.code || index}`,
+    severity,
+    topic,
+    message: entry.desc || entry.describe || fallback,
     imported: true
-  }));
+  });
+  [...(core.warnings || []), ...(core.alarms?.warnings || [])].forEach((warning, index) => pushCoreLog(warning, "High", "RDS Core issue", `RDS warning ${warning.code || index}`));
+  [...(core.errors || []), ...(core.alarms?.errors || [])].forEach((error, index) => pushCoreLog(error, "High", "RDS Core issue", `RDS error ${error.code || index}`));
+  [...(core.fatals || []), ...(core.alarms?.fatals || [])].forEach((fatal, index) => pushCoreLog(fatal, "High", "RDS Core issue", `RDS fatal ${fatal.code || index}`));
   reports.forEach((item) => {
     const rbk = item.rbk_report || {};
     const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
     const warnings = [...(item.warnings || []), ...(rbk.warnings || []), ...(rbk.alarms?.warnings || [])];
     const disconnected = Number(item.connection_status) === 0 || item.undispatchable_reason?.disconnect === true;
-    if (disconnected) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "RDS Core", category: "AMR", severity: "High", topic: "Robot offline / disconnect", message: `${name} is disconnected in RDS core feed. IP ${item.basic_info?.ip || "unknown"}.`, imported: true });
-    if (rbk.emergency) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "AMR Robot", category: "AMR", severity: "High", topic: "Application crash", message: `${name} reports emergency stop active.`, imported: true });
-    warnings.forEach((warning) => logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "AMR Robot", category: "AMR", severity: item.is_error ? "High" : "Medium", topic: "RDS Core issue", message: warning.desc || warning.describe || `RDS warning ${warning.code || "unknown"}`, imported: true }));
+    if (disconnected) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: rdsHost, host: `${plant} RDS`, vm: "", source: "RDS Core", category: "AMR", severity: "High", topic: "Robot offline / disconnect", message: `${name} is disconnected in RDS core feed. IP ${item.basic_info?.ip || "unknown"}.`, imported: true });
+    if (rbk.emergency) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: rdsHost, host: `${plant} RDS`, vm: "", source: "AMR Robot", category: "AMR", severity: "High", topic: "Application crash", message: `${name} reports emergency stop active.`, imported: true });
+    warnings.forEach((warning) => logs.push({ time: core.create_on || importedAt, plant, amr: name, server: rdsHost, host: `${plant} RDS`, vm: "", source: "AMR Robot", category: "AMR", severity: item.is_error ? "High" : "Medium", topic: "RDS Core issue", message: warning.desc || warning.describe || `RDS warning ${warning.code || "unknown"}`, imported: true }));
   });
   return {
     amrs,
@@ -437,8 +445,8 @@ function mergeRdsCoreImport(normalized) {
   state.amrs = state.amrs.filter((item) => !(item.imported && item.source === source)).concat(normalized.amrs);
   state.wifiPoints = state.wifiPoints.filter((item) => !(item.imported && item.source === source)).concat(normalized.points);
   state.logs = state.logs.filter((item) => !(item.imported && item.source === source)).concat(normalized.logs);
-  state.rdsImportNote = `Imported ${normalized.summary.robots} Shelbyville AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`;
-  setDiscoveryPoint("AMR live position", "Available", "RDS Core", "GET /api/agv-report/core", "Imported robot live status and position from Shelbyville core feed");
+  state.rdsImportNote = `Imported ${normalized.summary.robots} ${normalized.summary.plant} AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`;
+  setDiscoveryPoint("AMR live position", "Available", "RDS Core", "GET /api/agv-report/core", `Imported robot live status and position from ${normalized.summary.plant} core feed`);
   setDiscoveryPoint("AMR map X/Y coordinates", "Available", "RDS Core", "rbk_report.x / rbk_report.y", "Coordinates imported; map scale still needs scene geometry alignment");
   setDiscoveryPoint("Disconnect and reconnect events", "Partial", "RDS Core", "connection_status and undispatchable_reason.disconnect", "Disconnect state is available; reconnect count still needs historical logs");
   setDiscoveryPoint("RDS map and model data", "Available", "RDS Core", "model_md5, scene_md5, current_map_md5", "Map/model metadata imported from core feed");
@@ -450,7 +458,8 @@ function handleRdsCoreImport(event) {
   reader.onload = () => {
     try {
       const payload = JSON.parse(reader.result);
-      const normalized = normalizeRdsCoreResponse(payload, "Shelbyville");
+      const selectedImportPlant = $("#rdsImportPlant")?.value || "Shelbyville";
+      const normalized = normalizeRdsCoreResponse(payload, selectedImportPlant);
       mergeRdsCoreImport(normalized);
       saveState();
       refreshAll();

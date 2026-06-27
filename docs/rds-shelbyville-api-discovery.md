@@ -1,4 +1,4 @@
-﻿# Shelbyville RDS API Discovery
+# Shelbyville RDS API Discovery
 
 Plant: Shelbyville
 RDS URL: http://10.205.22.12:8080
@@ -171,16 +171,29 @@ DRISHTI AMR Health now supports importing this JSON directly:
 1. Save a `/api/agv-report/core` response as `.json`.
 2. Open DRISHTI AMR Health.
 3. Go to `Admin`.
-4. Use `Shelbyville RDS Core Import`.
-5. Import the JSON file.
+4. Use `RDS Core Import`.
+5. Select the matching plant, then import the JSON file.
 
 The app normalizes AMR rows, RDS position points, evidence logs, and discovery status. Raw plant snapshots should stay local and should not be committed.
 
-A helper script is available:
+Helper scripts are available:
 
 ```powershell
+.\scripts\pull-rds-core.ps1 -Plant Shelbyville
+.\scripts\pull-rds-core.ps1 -Plant Springfield
 .\scripts\pull-shelbyville-rds.ps1
 .\scripts\pull-shelbyville-rds.ps1 -IncludeScene
 ```
 
 Snapshots are written under `data/rds-snapshots/`, which is ignored by Git.
+
+## Springfield RDS Core Endpoint
+
+Springfield uses the same RDS core contract:
+
+- Base URL: `http://10.222.10.76:8080`
+- Core feed: `GET /api/agv-report/core`
+- Response: JSON with `data.report[]`, `data.model_md5`, `data.scene_md5`, and alarm arrays.
+
+The Springfield import path uses the same parser as Shelbyville. Select `Springfield` in Admin before importing a Springfield core JSON file so AMRs, positions, and logs are labeled correctly.
+
