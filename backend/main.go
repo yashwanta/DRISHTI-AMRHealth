@@ -38,6 +38,34 @@ type WifiSource struct {
 	SavedAt   string `json:"savedAt"`
 }
 
+type WifiRobot struct {
+	Plant string `json:"plant"`
+	Name  string `json:"name"`
+	IP    string `json:"ip"`
+}
+
+type WifiDiscoverRequest struct {
+	Source WifiSource  `json:"source"`
+	Robots []WifiRobot `json:"robots"`
+}
+
+type WifiDiscoverResult struct {
+	OK      bool   `json:"ok"`
+	Plant   string `json:"plant"`
+	AMR     string `json:"amr"`
+	Host    string `json:"host"`
+	Command string `json:"command,omitempty"`
+	Message string `json:"message"`
+	Output  string `json:"output,omitempty"`
+	RSSI    *int   `json:"rssi,omitempty"`
+	Quality string `json:"quality,omitempty"`
+}
+
+type WifiDiscoverResponse struct {
+	OK      bool                 `json:"ok"`
+	Message string               `json:"message"`
+	Results []WifiDiscoverResult `json:"results"`
+}
 type WifiTestResult struct {
 	OK      bool   `json:"ok"`
 	Method  string `json:"method"`
@@ -65,6 +93,7 @@ func main() {
 	mux.HandleFunc("/api/health", server.handleHealth)
 	mux.HandleFunc("/api/connections", server.handleConnections)
 	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
+	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
 	mux.HandleFunc("/", server.handleStatic)
 
@@ -144,6 +173,21 @@ func (s *Server) handleWifiTest(w http.ResponseWriter, r *http.Request) {
 	result, status := s.testWifiSource(source)
 	writeJSON(w, status, result)
 }
+
+func (s *Server) handleWifiDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+		return
+	}
+	var request WifiDiscoverRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	response, status := s.discoverWifiRSSI(request)
+	writeJSON(w, status, response)
+}
 func (s *Server) handlePlantProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -206,6 +250,126 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
 }
 
+func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResponse, int) {
+	source := normalizeWifiSource(request.Source)
+	if source.Method != "AMR SSH" {
+		return WifiDiscoverResponse{Message: "Only AMR SSH auto-discovery is supported right now."}, http.StatusBadRequest
+	}
+	if source.Username == "" {
+		return WifiDiscoverResponse{Message: "Username is required for AMR RSSI auto-discovery."}, http.StatusBadRequest
+	}
+	if looksLikePublicKey(source.SecretRef) {
+		return WifiDiscoverResponse{Message: "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."}, http.StatusBadRequest
+	}
+	if len(request.Robots) == 0 {
+		return WifiDiscoverResponse{Message: "No AMR robot IPs were provided. Pull RDS core first so DRISHTI can read basic_info.ip."}, http.StatusBadRequest
+	}
+
+	results := make([]WifiDiscoverResult, 0, len(request.Robots))
+	okCount := 0
+	for _, robot := range request.Robots {
+		robot.IP = strings.TrimSpace(robot.IP)
+		robot.Name = strings.TrimSpace(robot.Name)
+		if robot.IP == "" || robot.IP == "unknown" {
+			results = append(results, WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Message: "No robot IP from RDS basic_info.ip."})
+			continue
+		}
+		result := s.discoverRobotRSSI(source, robot)
+		if result.OK {
+			okCount++
+		}
+		results = append(results, result)
+	}
+	message := fmt.Sprintf("Found real RSSI on %d of %d AMRs.", okCount, len(results))
+	return WifiDiscoverResponse{OK: okCount > 0, Message: message, Results: results}, http.StatusOK
+}
+
+func (s *Server) discoverRobotRSSI(source WifiSource, robot WifiRobot) WifiDiscoverResult {
+	commands := wifiDiscoveryCommands(source.Command)
+	last := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Message: "No RSSI command succeeded."}
+	for _, command := range commands {
+		source.Host = robot.IP
+		output, err := runSSHCommand(source, command, 10*time.Second)
+		cleanOutput := trimOutput(output)
+		last = WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Command: command, Output: cleanOutput}
+		if err != nil {
+			last.Message = fmt.Sprintf("SSH command failed: %v", err)
+			continue
+		}
+		rssi := parseRSSI(cleanOutput)
+		if rssi == nil {
+			last.Message = "Command succeeded, but no RSSI value was found."
+			last.Quality = "Unknown"
+			continue
+		}
+		last.OK = true
+		last.RSSI = rssi
+		last.Quality = rssiQuality(*rssi)
+		last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s).", *rssi, last.Quality)
+		return last
+	}
+	return last
+}
+
+func wifiDiscoveryCommands(preferred string) []string {
+	commands := []string{}
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" && preferred != "iw dev wlan0 link" {
+		commands = append(commands, preferred)
+	}
+	commands = append(commands,
+		"iw dev wlan0 link",
+		`sh -lc "for i in $(iw dev 2>/dev/null | awk '/Interface/ {print $2}'); do iw dev \"$i\" link; done"`,
+		"cat /proc/net/wireless",
+		"nmcli -t -f ACTIVE,SSID,SIGNAL,BARS,CHAN,FREQ dev wifi",
+	)
+	seen := map[string]bool{}
+	uniqueCommands := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if command == "" || seen[command] {
+			continue
+		}
+		seen[command] = true
+		uniqueCommands = append(uniqueCommands, command)
+	}
+	return uniqueCommands
+}
+
+func normalizeWifiSource(source WifiSource) WifiSource {
+	source.Method = strings.TrimSpace(source.Method)
+	source.Host = strings.TrimSpace(source.Host)
+	source.Username = strings.TrimSpace(source.Username)
+	source.SecretRef = strings.TrimSpace(source.SecretRef)
+	source.Command = strings.TrimSpace(source.Command)
+	return source
+}
+
+func runSSHCommand(source WifiSource, command string, timeout time.Duration) (string, error) {
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=8",
+		"-o", "StrictHostKeyChecking=accept-new",
+	}
+	if source.SecretRef != "" && source.SecretRef != "CyberArk or SSH key reference" {
+		args = append(args, "-i", source.SecretRef)
+	}
+	args = append(args, fmt.Sprintf("%s@%s", source.Username, source.Host), command)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ssh", args...).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(output), fmt.Errorf("SSH timed out after %s", timeout)
+	}
+	return string(output), err
+}
+
+func trimOutput(output string) string {
+	cleanOutput := strings.TrimSpace(output)
+	if len(cleanOutput) > 2000 {
+		cleanOutput = cleanOutput[:2000]
+	}
+	return cleanOutput
+}
 func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	source.Method = strings.TrimSpace(source.Method)
 	source.Host = strings.TrimSpace(source.Host)
@@ -278,6 +442,7 @@ func parseRSSI(output string) *int {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)signal:\s*(-?\d+)\s*dBm`),
 		regexp.MustCompile(`(?i)rssi[^-\d]*(-?\d+)`),
+		regexp.MustCompile(`(?m)^\s*[A-Za-z0-9_.-]+:\s+\S+\s+\S+\s+(-?\d+)\.?`),
 	}
 	for _, pattern := range patterns {
 		match := pattern.FindStringSubmatch(output)
@@ -286,6 +451,15 @@ func parseRSSI(output string) *int {
 			if err == nil {
 				return &value
 			}
+		}
+	}
+	percentPattern := regexp.MustCompile(`(?m)^(?:yes|\*)[^:]*:[^:\n]*:(\d{1,3}):`)
+	match := percentPattern.FindStringSubmatch(output)
+	if len(match) == 2 {
+		percent, err := strconv.Atoi(match[1])
+		if err == nil {
+			value := percent/2 - 100
+			return &value
 		}
 	}
 	return nil
