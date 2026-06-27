@@ -185,7 +185,25 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .heatmap-actions, .heatmap-controls, .import-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .heatmap-controls { margin-bottom: 14px; }
 .map-shell { position: relative; width: 100%; aspect-ratio: 12 / 7; min-height: 360px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #0f172a; }
-.map-shell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.scene-map { display: grid; grid-template-rows: 1fr auto; background: #f8fafc; }
+.scene-map-svg { width: 100%; height: 100%; min-height: 0; display: block; background: #f8fafc; }
+.map-bg { fill: #f8fafc; }
+.map-bin { fill: rgba(148, 163, 184, 0.18); stroke: rgba(71, 85, 105, 0.42); stroke-width: 0.055; }
+.map-path { fill: none; stroke: #2563eb; stroke-width: 0.075; stroke-linecap: round; opacity: 0.82; }
+.map-path.degeneratebezier { stroke: #0891b2; stroke-width: 0.095; }
+.map-node circle { fill: #ffffff; stroke: #64748b; stroke-width: 0.06; }
+.map-node.pickup circle { fill: #dbeafe; stroke: #2563eb; }
+.map-node.action circle { fill: #dcfce7; stroke: #16a34a; }
+.map-node text { font-size: 0.72px; fill: #334155; paint-order: stroke; stroke: #ffffff; stroke-width: 0.16px; stroke-linejoin: round; }
+.map-robot circle { stroke: #111827; stroke-width: 0.14; filter: drop-shadow(0 0.12px 0.16px rgba(15, 23, 42, 0.38)); }
+.map-robot.good circle { fill: var(--green); }
+.map-robot.weak circle { fill: var(--yellow); }
+.map-robot.poor circle { fill: var(--orange); }
+.map-robot.critical circle { fill: var(--red); }
+.map-robot text { font-size: 1.05px; font-weight: 800; fill: #0f172a; paint-order: stroke; stroke: #ffffff; stroke-width: 0.28px; stroke-linejoin: round; }
+.map-caption { padding: 8px 12px; background: rgba(15, 23, 42, 0.9); color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
+.map-empty { display: grid; place-items: center; align-content: center; gap: 6px; text-align: center; color: var(--muted); background: #0f172a; }
+.map-empty strong { color: white; }
 .heatmap-overlay { position: absolute; inset: 0; }
 .map-point {
   position: absolute;
