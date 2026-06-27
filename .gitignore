@@ -5,6 +5,7 @@ Thumbs.db
 .env.*
 node_modules/
 dist/
+.package/
 build/
 .gocache/
 rds-discovery/
