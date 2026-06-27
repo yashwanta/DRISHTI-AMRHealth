@@ -10,12 +10,15 @@ type AMR = {
   id: string; name: string; plant: string; ip: string; status: Status; reconnects: number; disconnects: number; offline: string;
   worstDrop: string; rssi: number; ap: string; ssid: string; channel: string; band: string; imported?: boolean; source?: string;
   battery?: string; rdsX?: number | string; rdsY?: number | string; mapMd5?: string; modelMd5?: string; issue?: string;
+  networkDelay?: number; connectionStatus?: number; connectivityReason?: string; currentStation?: string;
 };
 type WifiPoint = { plant: string; amr: string; x: number; y: number; rssi: number; quality: "Good" | "Weak" | "Poor" | "Critical"; ap: string; ssid: string; channel: string; band: string; reconnect: boolean; disconnect: boolean; offline: boolean; roaming: boolean; time: string; imported?: boolean; source?: string; rdsX?: number; rdsY?: number };
 type LogEntry = { time: string; plant: string; amr: string; server: string; host: string; vm: string; source: string; category: string; severity: Severity; topic: string; message: string; imported?: boolean };
-type BadZone = { plant: string; zone: string; disconnects: number; reconnects: number; offline: number; weak: number; roaming: number; score: number };
+type BadZone = { plant: string; zone: string; disconnects: number; reconnects: number; offline: number; weak: number; roaming: number; score: number; robots?: string[]; reason?: string };
+type WifiSource = { plant: string; name: string; method: "AMR SSH" | "Controller API" | "Manual Import"; host: string; username: string; secretRef: string; command: string; savedAt: string };
 type AppState = {
   amrs: AMR[]; wifiPoints: WifiPoint[]; logs: LogEntry[]; badZones: BadZone[]; sceneMaps: Record<string, SceneMap>;
+  wifiSources: WifiSource[];
   discovery: { point: string; status: string; source: string; command: string; gap: string }[];
   rdsImportNote: string; uploadedMap: string;
 };
@@ -33,6 +36,7 @@ const seed: AppState = {
   logs: [],
   badZones: [],
   sceneMaps: {},
+  wifiSources: [],
   discovery: [
     { point: "AMR live position", status: "Not Run", source: "Go RDS proxy", command: "GET /api/plants/{plant}/rds/core", gap: "Needs configured plant URL" },
     { point: "AMR map X/Y coordinates", status: "Not Run", source: "RDS core", command: "rbk_report.x / rbk_report.y", gap: "Scene geometry alignment still needed" },
@@ -46,6 +50,50 @@ const seed: AppState = {
 function slug(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""); }
 function unique(values: string[]) { return [...new Set(values.filter(Boolean))].sort(); }
 function badge(value: string) { return <span className={`badge ${value.toLowerCase().replace(/\s+/g, "-")}`}>{value}</span>; }
+function qualityFromConnection(disconnected: boolean, networkDelay?: number, issue = false): WifiPoint["quality"] {
+  if (disconnected || issue) return "Critical";
+  if (typeof networkDelay === "number" && Number.isFinite(networkDelay)) {
+    if (networkDelay >= 150) return "Poor";
+    if (networkDelay >= 80) return "Weak";
+  }
+  return "Good";
+}
+function rssiEstimate(quality: WifiPoint["quality"]) { return quality === "Good" ? -58 : quality === "Weak" ? -70 : quality === "Poor" ? -80 : -90; }
+function connectivityQuality(amr: AMR): WifiPoint["quality"] {
+  const disconnected = amr.status === "Disconnected" || amr.status === "Offline" || amr.connectionStatus === 0;
+  return qualityFromConnection(disconnected, amr.networkDelay, amr.issue?.toLowerCase().includes("emergency") || amr.issue?.toLowerCase().includes("error"));
+}
+function connectivityReason(amr: AMR) {
+  const quality = connectivityQuality(amr);
+  if (amr.connectivityReason) return amr.connectivityReason;
+  if (quality === "Critical") return amr.status === "Online" ? "RDS reports an error state" : "RDS reports robot disconnected or offline";
+  if (quality === "Poor") return `High RDS network delay (${amr.networkDelay} ms)`;
+  if (quality === "Weak") return `Elevated RDS network delay (${amr.networkDelay} ms)`;
+  return "RDS reports active connection. RSSI source not connected yet.";
+}
+function deriveBadZones(amrs: AMR[], points: WifiPoint[] = []): BadZone[] {
+  const buckets = new Map<string, BadZone>();
+  const pointByAmr = new Map(points.map((point) => [point.amr, point]));
+  amrs.forEach((amr) => {
+    const point = pointByAmr.get(amr.name);
+    const quality = point?.quality || connectivityQuality(amr);
+    const isIssue = quality !== "Good" || amr.disconnects > 0 || amr.reconnects > 0 || amr.status !== "Online";
+    if (!isIssue) return;
+    const zoneName = amr.worstDrop || amr.currentStation || "Unknown location";
+    const key = `${amr.plant}-${zoneName}`;
+    const current = buckets.get(key) || { plant: amr.plant, zone: zoneName, disconnects: 0, reconnects: 0, offline: 0, weak: 0, roaming: 0, score: 0, robots: [], reason: "" };
+    current.disconnects += Number(amr.disconnects || 0) + (quality === "Critical" ? 1 : 0);
+    current.reconnects += Number(amr.reconnects || 0);
+    current.offline += amr.status === "Offline" || amr.status === "Disconnected" ? 1 : 0;
+    current.weak += quality === "Weak" || quality === "Poor" ? 1 : 0;
+    current.roaming += point?.roaming ? 1 : 0;
+    current.robots = unique([...(current.robots || []), amr.name]);
+    current.reason = `${quality}: ${connectivityReason(amr)}`;
+    current.score = Math.min(100, current.disconnects * 34 + current.offline * 24 + current.weak * 18 + current.reconnects * 8 + current.roaming * 6);
+    buckets.set(key, current);
+  });
+  return [...buckets.values()].sort((a, b) => b.score - a.score || a.zone.localeCompare(b.zone));
+}
 function loadState(): AppState { try { return { ...seed, ...(JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") || {}) }; } catch { return seed; } }
 function normalizePath(path: string, fallback: string) { const value = (path || fallback).trim() || fallback; return value.startsWith("/") ? value : `/${value}`; }
 function normalizeBaseUrl(url: string) { return (url || "").trim().replace(/\/+$/, ""); }
@@ -69,25 +117,31 @@ function normalizeRdsCoreResponse(payload: any, plant: string, connection?: APIC
     const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
     const warnings = [...(item.warnings || []), ...(rbk.warnings || []), ...(rbk.alarms?.warnings || [])];
     const errors = [...(item.errors || []), ...(rbk.errors || []), ...(rbk.alarms?.errors || [])];
+    const networkDelay = Number(item.network_delay);
     const disconnected = Number(item.connection_status) === 0 || item.undispatchable_reason?.disconnect === true;
     const currentStation = rbk.current_station || item.current_order?.blocks?.[0]?.location || "No station reported";
+    const quality = qualityFromConnection(disconnected, Number.isFinite(networkDelay) ? networkDelay : undefined, rbk.emergency === true || item.is_error === true || errors.length > 0);
+    const reason = disconnected ? "RDS reports robot disconnected" : quality === "Poor" ? `High RDS network delay (${networkDelay} ms)` : quality === "Weak" ? `Elevated RDS network delay (${networkDelay} ms)` : rbk.emergency ? "Emergency stop active" : errors.length ? "RDS error present" : warnings.length ? warnings[0].desc || warnings[0].describe || "RDS warning present" : "RDS reports active connection";
     return {
       id: `rds-${slug(plant)}-${slug(name)}`, name, plant, ip: basic.ip || "unknown", status: disconnected ? "Disconnected" : "Online",
       reconnects: 0, disconnects: disconnected ? 1 : 0, offline: disconnected ? "Disconnected now" : "0m", worstDrop: currentStation,
-      rssi: -60, ap: "RDS Core position only", ssid: "unknown", channel: "unknown", band: "unknown", imported: true, source,
+      rssi: rssiEstimate(quality), ap: "RDS Core connectivity", ssid: "RSSI source not connected", channel: "unknown", band: "unknown", imported: true, source,
       battery: Number.isFinite(Number(rbk.battery_level)) ? `${Math.round(Number(rbk.battery_level) * 100)}%` : "unknown",
       rdsX: rbk.x, rdsY: rbk.y, mapMd5: rbk.current_map_md5 || core.scene_md5 || "unknown", modelMd5: core.model_md5 || "unknown",
-      issue: disconnected ? "RDS reports robot disconnected" : rbk.emergency ? "Emergency stop active" : errors.length ? "RDS error present" : warnings.length ? warnings[0].desc || warnings[0].describe || "RDS warning present" : "No active RDS issue"
+      networkDelay: Number.isFinite(networkDelay) ? networkDelay : undefined, connectionStatus: Number(item.connection_status), currentStation,
+      issue: reason, connectivityReason: reason
     };
   });
   const points: WifiPoint[] = reports.map((item: any) => {
     const rbk = item.rbk_report || {};
     const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
+    const networkDelay = Number(item.network_delay);
     const disconnected = Number(item.connection_status) === 0 || item.undispatchable_reason?.disconnect === true;
+    const quality = qualityFromConnection(disconnected, Number.isFinite(networkDelay) ? networkDelay : undefined, rbk.emergency === true || item.is_error === true);
     return {
       plant, amr: name, x: Math.max(5, Math.min(95, Number.isFinite(Number(rbk.x)) ? scale(rbk.x, minX, maxX) : 50)), y: Math.max(5, Math.min(95, Number.isFinite(Number(rbk.y)) ? scale(rbk.y, minY, maxY) : 50)),
-      rssi: -60, quality: disconnected || rbk.emergency === true || item.is_error === true ? "Critical" : "Good",
-      ap: "RDS Core position only", ssid: "unknown", channel: "unknown", band: "unknown", reconnect: false, disconnect: disconnected, offline: disconnected, roaming: false, time: core.create_on || importedAt, imported: true, source, rdsX: Number(rbk.x), rdsY: Number(rbk.y)
+      rssi: rssiEstimate(quality), quality,
+      ap: "RDS Core connectivity", ssid: "RSSI source not connected", channel: "unknown", band: "unknown", reconnect: false, disconnect: disconnected, offline: disconnected, roaming: false, time: core.create_on || importedAt, imported: true, source, rdsX: Number(rbk.x), rdsY: Number(rbk.y)
     };
   });
   const logs: LogEntry[] = [];
@@ -141,7 +195,7 @@ function normalizeSceneResponse(payload: any, plant: string): SceneMap {
   const xs = all.map((point) => point.x), ys = all.map((point) => point.y);
   return { plant, area: area?.name || "RDS Area", md5: payload?.data?.md5 || scene?.md5 || "unknown", bounds: { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }, paths, points, bins };
 }
-function SceneMapView({ scene, points, amrs }: { scene?: SceneMap; points: WifiPoint[]; amrs: AMR[] }) {
+function SceneMapView({ scene, points, amrs, signalFilter, onSelectAmr }: { scene?: SceneMap; points: WifiPoint[]; amrs: AMR[]; signalFilter: string; onSelectAmr?: (name: string) => void }) {
   if (!scene) return <div className="map-shell map-empty"><strong>No RDS map loaded</strong><span>Pull a plant map to show the real RDS layout here.</span></div>;
   const pad = 2;
   const minX = scene.bounds.minX - pad, maxX = scene.bounds.maxX + pad, minY = scene.bounds.minY - pad, maxY = scene.bounds.maxY + pad;
@@ -150,17 +204,24 @@ function SceneMapView({ scene, points, amrs }: { scene?: SceneMap; points: WifiP
   const pathD = (path: MapPath) => path.control1 && path.control2
     ? `M ${path.start.x} ${y(path.start.y)} C ${path.control1.x} ${y(path.control1.y)} ${path.control2.x} ${y(path.control2.y)} ${path.end.x} ${y(path.end.y)}`
     : `M ${path.start.x} ${y(path.start.y)} L ${path.end.x} ${y(path.end.y)}`;
+  const amrByName = new Map(amrs.map((amr) => [amr.name, amr]));
   const pointMarkers = points.filter((point) => Number.isFinite(point.rdsX) && Number.isFinite(point.rdsY));
   const pointNames = new Set(pointMarkers.map((point) => point.amr));
-  const amrMarkers = amrs.filter((amr) => !pointNames.has(amr.name) && Number.isFinite(Number(amr.rdsX)) && Number.isFinite(Number(amr.rdsY))).map((amr) => ({ plant: amr.plant, amr: amr.name, quality: amr.status === "Online" ? "Good" : "Critical", rssi: amr.rssi, rdsX: Number(amr.rdsX), rdsY: Number(amr.rdsY) } as WifiPoint));
+  const amrMarkers = amrs.filter((amr) => !pointNames.has(amr.name) && Number.isFinite(Number(amr.rdsX)) && Number.isFinite(Number(amr.rdsY))).map((amr) => ({ plant: amr.plant, amr: amr.name, quality: connectivityQuality(amr), rssi: rssiEstimate(connectivityQuality(amr)), rdsX: Number(amr.rdsX), rdsY: Number(amr.rdsY) } as WifiPoint));
   const robotPoints = pointMarkers.concat(amrMarkers);
+  const pointTitle = (point: WifiPoint) => {
+    const amr = amrByName.get(point.amr);
+    const delay = amr?.networkDelay !== undefined ? `${amr.networkDelay} ms` : "not reported";
+    return `${point.amr}\nQuality: ${point.quality}\nConnection: ${amr?.status || "unknown"}\nNetwork delay: ${delay}\nLocation: ${amr?.worstDrop || "unknown"}\nReason: ${amr ? connectivityReason(amr) : "RDS point marker"}\nRSSI: telemetry source not connected yet`;
+  };
   return <div className="map-shell scene-map"><svg className="scene-map-svg" viewBox={`${minX} ${-maxY} ${width} ${height}`} role="img" aria-label={`${scene.plant} RDS map`}>
     <rect x={minX} y={-maxY} width={width} height={height} className="map-bg" />
     <g>{scene.bins.map((bin) => <polygon key={bin.name} points={bin.points.map((point) => `${point.x},${y(point.y)}`).join(" ")} className="map-bin"><title>{bin.name}</title></polygon>)}</g>
     <g>{scene.paths.map((path) => <path key={path.name} d={pathD(path)} className={`map-path ${path.className.toLowerCase()}`}><title>{path.name}</title></path>)}</g>
     <g>{scene.points.map((point) => <g key={point.name} className={`map-node ${point.name.startsWith("PP") ? "pickup" : point.name.startsWith("AP") ? "action" : "landmark"}`}><circle cx={point.x} cy={y(point.y)} r="0.22" /><text x={point.x + 0.28} y={y(point.y) - 0.22}>{point.name}</text></g>)}</g>
-    <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}`} className={`map-robot ${point.quality.toLowerCase()}`}><circle cx={point.rdsX} cy={y(point.rdsY || 0)} r="0.62" /><text x={(point.rdsX || 0) + 0.72} y={y(point.rdsY || 0) - 0.45}>{point.amr}</text><title>{`${point.amr} ${point.quality} ${point.rssi} dBm`}</title></g>)}</g>
-  </svg><div className="map-caption">{scene.plant} - {scene.area} - {scene.paths.length} paths - {scene.points.length} points - map MD5 {scene.md5}</div></div>;
+    <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}-zone`} className={`map-heat-zone ${point.quality.toLowerCase()}`}><circle cx={point.rdsX} cy={y(point.rdsY || 0)} r="3.2" /><circle cx={point.rdsX} cy={y(point.rdsY || 0)} r="1.6" /></g>)}</g>
+    <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}`} className={`map-robot ${point.quality.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onSelectAmr?.(point.amr)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectAmr?.(point.amr); }}> <circle cx={point.rdsX} cy={y(point.rdsY || 0)} r="0.62" /><text x={(point.rdsX || 0) + 0.72} y={y(point.rdsY || 0) - 0.45}>{point.amr}</text><title>{pointTitle(point)}</title></g>)}</g>
+  </svg>{robotPoints.length === 0 && <div className="map-overlay-note">No {signalFilter} markers for {scene.plant}. RDS currently provides AMR position/status; true Wi-Fi RSSI overlay needs Wi-Fi telemetry.</div>}<div className="map-caption">{scene.plant} - {scene.area} - {scene.paths.length} paths - {scene.points.length} points - map MD5 {scene.md5}</div></div>;
 }
 function App() {
   const [state, setState] = useState<AppState>(loadState);
@@ -173,6 +234,8 @@ function App() {
   const [signalFilter, setSignalFilter] = useState("All");
   const [logKeyword, setLogKeyword] = useState("");
   const [apiForm, setApiForm] = useState<APIConnection>({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
+  const [wifiForm, setWifiForm] = useState<Omit<WifiSource, "savedAt">>({ plant: "Shelbyville", name: "AMR Wi-Fi RSSI", method: "AMR SSH", host: "", username: "", secretRef: "CyberArk or SSH key reference", command: "iw dev wlan0 link" });
+  const [selectedMapAmr, setSelectedMapAmr] = useState("");
   const [busy, setBusy] = useState("");
 
   useEffect(() => { LEGACY_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key)); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [state]);
@@ -191,14 +254,32 @@ function App() {
   const filteredPoints = useMemo(() => state.wifiPoints.filter((point) => (plantFilter === "All" || point.plant === plantFilter) && (signalFilter === "All" || point.quality === signalFilter)), [state.wifiPoints, plantFilter, signalFilter]);
   const heatmapPlant = selectedImportPlant;
   const heatmapPoints = useMemo(() => state.wifiPoints.filter((point) => point.plant === heatmapPlant && (signalFilter === "All" || point.quality === signalFilter)), [state.wifiPoints, signalFilter, heatmapPlant]);
+  const heatmapAmrs = useMemo(() => state.amrs.filter((amr) => amr.plant === heatmapPlant && (signalFilter === "All" || connectivityQuality(amr) === signalFilter)), [state.amrs, heatmapPlant, signalFilter]);
   const activeSceneMap = state.sceneMaps[heatmapPlant];
+  const visibleBadZones = useMemo(() => {
+    const saved = state.badZones.filter((zone) => plantFilter === "All" || zone.plant === plantFilter);
+    return saved.length ? saved : deriveBadZones(state.amrs.filter((amr) => plantFilter === "All" || amr.plant === plantFilter), state.wifiPoints);
+  }, [state.badZones, state.amrs, state.wifiPoints, plantFilter]);
+  const selectedHeatmapAmr = useMemo(() => state.amrs.find((amr) => amr.plant === heatmapPlant && amr.name === selectedMapAmr) || null, [state.amrs, heatmapPlant, selectedMapAmr]);
+  const reportCards = useMemo(() => {
+    const badZones = visibleBadZones;
+    const issueAmrs = filteredAmrs.filter((amr) => connectivityQuality(amr) !== "Good");
+    const highLogs = filteredLogs.filter((log) => log.severity === "High");
+    const worstZone = badZones[0];
+    return [
+      { label: "Plant Health", value: `${filteredAmrs.filter((amr) => connectivityQuality(amr) === "Good").length}/${filteredAmrs.length}`, help: "AMRs with good current RDS connectivity" },
+      { label: "Connectivity Risk", value: issueAmrs.length, help: issueAmrs.length ? `${issueAmrs.map((amr) => amr.name).slice(0, 3).join(", ")} need review` : "No weak, poor, or critical AMRs in scope" },
+      { label: "Worst Area", value: worstZone?.zone || "None", help: worstZone ? `${worstZone.plant} score ${worstZone.score}; ${(worstZone.robots || []).join(", ")}` : "No bad zones detected from current RDS sample" },
+      { label: "High Events", value: highLogs.length, help: highLogs[0] ? highLogs[0].message : "No high severity RDS events in scope" }
+    ];
+  }, [visibleBadZones, filteredAmrs, filteredLogs]);
   function mergeImport(normalized: NormalizedRds) {
     setState((current) => ({
       ...current,
       amrs: current.amrs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.amrs),
       wifiPoints: current.wifiPoints.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.points),
       logs: current.logs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.logs),
-      badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant),
+      badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant).concat(deriveBadZones(normalized.amrs, normalized.points)),
       rdsImportNote: `Imported ${normalized.summary.robots} ${normalized.summary.plant} AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`,
       discovery: current.discovery.map((item) => item.point.includes("AMR ") || item.point.includes("RDS ") ? { ...item, status: "Available", source: "Go RDS proxy", gap: `Updated from ${normalized.summary.plant} core feed` } : item)
     }));
@@ -247,6 +328,16 @@ function App() {
     if (response.ok) setConnections(await response.json() as APIConnection[]);
     setApiForm({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
   }
+  function saveWifiSource(event: React.FormEvent) {
+    event.preventDefault();
+    const plant = wifiForm.plant.trim() || selectedImportPlant;
+    const payload: WifiSource = { ...wifiForm, plant, name: wifiForm.name.trim() || `${plant} RSSI source`, host: wifiForm.host.trim(), username: wifiForm.username.trim(), secretRef: wifiForm.secretRef.trim(), command: wifiForm.command.trim() || "iw dev wlan0 link", savedAt: new Date().toISOString() };
+    setState((current) => ({
+      ...current,
+      wifiSources: (current.wifiSources || []).filter((item) => !(item.plant === payload.plant && item.name === payload.name)).concat(payload),
+      discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: "Partial", source: payload.method, command: payload.command, gap: "Source saved locally; parser/collector still needs to be wired to collect live RSSI." } : item)
+    }));
+  }
   const metrics = [
     ["AMRs", filteredAmrs.length, "Filtered inventory"],
     ["Online", filteredAmrs.filter((amr) => amr.status === "Online").length, "Healthy now"],
@@ -256,13 +347,10 @@ function App() {
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand-block"><div className="brand-mark">D</div><div><div className="brand-title">DRISHTI</div><div className="brand-subtitle">AMR Health</div></div></div><nav className="nav-list">{(["dashboard", "logs", "discovery", "heatmap", "reports", "admin"] as View[]).map((item) => <button key={item} className={`nav-item ${view === item ? "active" : ""}`} onClick={() => setView(item)}><span>{item[0].toUpperCase()}</span>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav><div className="sidebar-status"><div className="status-dot"></div><div><strong>Go + React</strong><span>Local RDS proxy enabled</span></div></div></aside>
     <main className="main-content"><header className="topbar"><div><h1>{view === "dashboard" ? "AMR Health Dashboard" : view[0].toUpperCase() + view.slice(1)}</h1><p>Go backend, React UI, local config, and local-only RDS snapshots.</p></div><div className="topbar-controls"><label className="field compact"><span>Plant</span><select value={plantFilter} onChange={(e) => setPlantFilter(e.target.value)}><option>All</option>{plantOptions.map((plant) => <option key={plant}>{plant}</option>)}</select></label><label className="field search-field"><span>Search</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="AMR, IP, zone, AP, topic" /></label></div></header>
-      {view === "dashboard" && <section className="view active-view"><div className="metric-grid">{metrics.map(([label, value, help]) => <article className="metric-card" key={label}><span className="metric-label">{label}</span><strong className="metric-value">{value}</strong><small className="metric-help">{help}</small></article>)}</div><div className="content-grid two-col"><section className="panel wide-panel"><div className="panel-header"><div><h2>AMR Fleet Health</h2><p>Investigate disconnects, offline time, and worst drop locations.</p></div><button className="primary-action" onClick={pullLiveCore} disabled={!connections.length || Boolean(busy)}>{busy || "Pull Selected RDS"}</button></div><div className="table-wrap"><table><thead><tr><th>AMR Name</th><th>Plant</th><th>IP</th><th>Status</th><th>Reconnect</th><th>Disconnect</th><th>Offline</th><th>Worst Drop</th><th>Investigate</th></tr></thead><tbody>{filteredAmrs.map((amr) => <tr key={amr.id}><td><strong>{amr.name}</strong></td><td>{amr.plant}</td><td>{amr.ip}</td><td>{badge(amr.status)}</td><td>{amr.reconnects}</td><td>{amr.disconnects}</td><td>{amr.offline}</td><td>{amr.worstDrop}</td><td><button className="row-action" onClick={() => setSelectedAmr(amr)}>Open</button></td></tr>)}</tbody></table></div></section><section className="panel"><div className="panel-header stacked"><h2>Bad Zone Areas</h2><p>Top repeated drop, reconnect, offline, and weak Wi-Fi areas.</p></div><div className="zone-list">{state.badZones.filter((zone) => plantFilter === "All" || zone.plant === plantFilter).map((zone) => <article className="zone-card" key={`${zone.plant}-${zone.zone}`}><header><strong>{zone.zone}</strong><span>{zone.score}</span></header><small>{zone.plant} - {zone.disconnects} disconnects, {zone.reconnects} reconnects</small><div className="score-bar"><span style={{ width: `${Math.min(zone.score, 100)}%` }}></span></div></article>)}</div></section></div>{selectedAmr && <section className="panel detail-panel"><div className="panel-header stacked"><h2>{selectedAmr.name} Detail</h2><p>{selectedAmr.plant} - {selectedAmr.ip} - worst drop: {selectedAmr.worstDrop}</p></div><div className="detail-grid">{[["Status", selectedAmr.status], ["Battery", selectedAmr.battery || "unknown"], ["RDS Position", selectedAmr.rdsX !== undefined ? `x ${selectedAmr.rdsX}, y ${selectedAmr.rdsY}` : "unknown"], ["Issue", selectedAmr.issue || "No issue"], ["Map / Model", `${selectedAmr.mapMd5 || "unknown"} / ${selectedAmr.modelMd5 || "unknown"}`]].map(([label, value]) => <article className="detail-card" key={label}><span>{label}</span><strong>{value}</strong></article>)}</div></section>}</section>}
+      {view === "dashboard" && <section className="view active-view"><div className="metric-grid">{metrics.map(([label, value, help]) => <article className="metric-card" key={label}><span className="metric-label">{label}</span><strong className="metric-value">{value}</strong><small className="metric-help">{help}</small></article>)}</div><div className="content-grid two-col"><section className="panel wide-panel"><div className="panel-header"><div><h2>AMR Fleet Health</h2><p>Investigate disconnects, offline time, and worst drop locations.</p></div><button className="primary-action" onClick={pullLiveCore} disabled={!connections.length || Boolean(busy)}>{busy || "Pull Selected RDS"}</button></div><div className="table-wrap"><table><thead><tr><th>AMR Name</th><th>Plant</th><th>IP</th><th>Status</th><th>Reconnect</th><th>Disconnect</th><th>Offline</th><th>Worst Drop</th><th>Investigate</th></tr></thead><tbody>{filteredAmrs.map((amr) => <tr key={amr.id}><td><strong>{amr.name}</strong></td><td>{amr.plant}</td><td>{amr.ip}</td><td>{badge(amr.status)}</td><td>{amr.reconnects}</td><td>{amr.disconnects}</td><td>{amr.offline}</td><td>{amr.worstDrop}</td><td><button className="row-action" onClick={() => setSelectedAmr(amr)}>Open</button></td></tr>)}</tbody></table></div></section><section className="panel"><div className="panel-header stacked"><h2>Bad Zone Areas</h2><p>Top repeated drop, reconnect, offline, and weak Wi-Fi areas.</p></div><div className="zone-list">{visibleBadZones.length ? visibleBadZones.map((zone) => <article className="zone-card" key={`${zone.plant}-${zone.zone}`}><header><strong>{zone.zone}</strong><span>{zone.score}</span></header><small>{zone.plant} - {zone.disconnects} disconnects, {zone.reconnects} reconnects, robots {(zone.robots || []).join(", ") || "none"}</small><small>{zone.reason || "Computed from current AMR connectivity"}</small><div className="score-bar"><span style={{ width: `${Math.min(zone.score, 100)}%` }}></span></div></article>) : <article className="zone-card"><strong>No Bad Zones</strong><small>Current RDS sample does not show disconnected, weak, or poor AMR connectivity in scope.</small></article>}</div></section></div>{selectedAmr && <section className="panel detail-panel"><div className="panel-header stacked"><h2>{selectedAmr.name} Detail</h2><p>{selectedAmr.plant} - {selectedAmr.ip} - worst drop: {selectedAmr.worstDrop}</p></div><div className="detail-grid">{[["Status", selectedAmr.status], ["Battery", selectedAmr.battery || "unknown"], ["RDS Position", selectedAmr.rdsX !== undefined ? `x ${selectedAmr.rdsX}, y ${selectedAmr.rdsY}` : "unknown"], ["Issue", selectedAmr.issue || "No issue"], ["Map / Model", `${selectedAmr.mapMd5 || "unknown"} / ${selectedAmr.modelMd5 || "unknown"}`]].map(([label, value]) => <article className="detail-card" key={label}><span>{label}</span><strong>{value}</strong></article>)}</div></section>}</section>}
       {view === "admin" && <section className="view active-view"><div className="admin-grid"><section className="panel"><div className="panel-header stacked"><h2>RDS Core Import</h2><p>Pull live RDS through the Go backend or import saved core JSON.</p></div><div className="import-actions"><label className="field compact"><span>Plant</span><select value={selectedImportPlant} onChange={(e) => setSelectedImportPlant(e.target.value)}>{plantOptions.map((plant) => <option key={plant}>{plant}</option>)}</select></label><button className="primary-action" onClick={pullLiveCore} disabled={Boolean(busy)}>{busy || "Pull Live Core"}</button><label className="file-action">Import Core JSON<input type="file" accept=".json,application/json" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} /></label><button className="ghost-action" onClick={() => setState((current) => ({ ...current, amrs: current.amrs.filter((item) => !item.imported), wifiPoints: current.wifiPoints.filter((item) => !item.imported), logs: current.logs.filter((item) => !item.imported), rdsImportNote: "Imported RDS data cleared." }))}>Reset Imported Data</button></div><div className="threshold-note">{state.rdsImportNote}</div></section><section className="panel wide-panel"><div className="panel-header stacked"><h2>RDS API Connections</h2><p>Saved in local backend config, not committed to Git.</p></div><form className="form-grid" onSubmit={saveConnection}><label className="field"><span>Plant</span><input value={apiForm.plant} onChange={(e) => setApiForm({ ...apiForm, plant: e.target.value })} required placeholder="Shelbyville" /></label><label className="field"><span>Base URL</span><input value={apiForm.baseUrl} onChange={(e) => setApiForm({ ...apiForm, baseUrl: e.target.value })} required placeholder="http://rds-host:8080" /></label><label className="field"><span>Core Path</span><input value={apiForm.corePath} onChange={(e) => setApiForm({ ...apiForm, corePath: e.target.value })} required /></label><label className="field"><span>Scene Path</span><input value={apiForm.scenePath} onChange={(e) => setApiForm({ ...apiForm, scenePath: e.target.value })} required /></label><button className="primary-action" type="submit">Save Connection</button></form><div className="api-list">{connections.map((connection) => <article className="api-card" key={connection.plant}><header><strong>{connection.plant}</strong><button className="row-action" onClick={() => setApiForm(connection)}>Edit</button></header><div className="api-links"><span>Base <code>{connection.baseUrl}</code></span><span>Core <a href={apiUrl(connection, "corePath")} target="_blank">{apiUrl(connection, "corePath")}</a></span><span>Scene <a href={apiUrl(connection, "scenePath")} target="_blank">{apiUrl(connection, "scenePath")}</a></span><span>Local <code>/api/plants/{slug(connection.plant)}/rds/core</code></span></div></article>)}</div></section></div></section>}
       {view === "logs" && <section className="view active-view"><section className="panel filter-panel"><div className="panel-header"><div><h2>Log Investigation</h2><p>Filter AMR, RDS, Ubuntu, network, and VM evidence.</p></div><label className="field compact"><span>Keyword</span><input value={logKeyword} onChange={(e) => setLogKeyword(e.target.value)} placeholder="disconnect, map, battery" /></label></div></section><section className="panel"><div className="table-wrap"><table><thead><tr><th>Time</th><th>Plant</th><th>AMR</th><th>Topic</th><th>Source</th><th>Severity</th><th>Message</th></tr></thead><tbody>{filteredLogs.map((log, index) => <tr key={index}><td>{new Date(log.time).toLocaleString()}</td><td>{log.plant}</td><td>{log.amr}</td><td>{log.topic}</td><td>{log.source}</td><td>{badge(log.severity)}</td><td>{log.message}</td></tr>)}</tbody></table></div></section></section>}
-      {view === "discovery" && <section className="view active-view"><section className="panel"><div className="panel-header stacked"><h2>Data Discovery</h2><p>Source reliability and remaining telemetry gaps.</p></div><div className="table-wrap"><table><thead><tr><th>Data Point</th><th>Status</th><th>Best Source</th><th>Command or Path</th><th>Gap</th></tr></thead><tbody>{state.discovery.map((item) => <tr key={item.point}><td><strong>{item.point}</strong></td><td>{badge(item.status)}</td><td>{item.source}</td><td><code>{item.command}</code></td><td>{item.gap}</td></tr>)}</tbody></table></div></section></section>}
-      {view === "heatmap" && <section className="view active-view"><section className="panel heatmap-panel"><div className="panel-header"><div><h2>AMR Plant Map</h2><p>RDS scene map with AMR positions overlaid.</p></div><div className="heatmap-actions"><label className="field compact"><span>Map Plant</span><select value={heatmapPlant} onChange={(e) => setSelectedImportPlant(e.target.value)}>{plantOptions.filter((plant) => plant !== "All").map((plant) => <option key={plant}>{plant}</option>)}</select></label><label className="field compact"><span>Signal</span><select value={signalFilter} onChange={(e) => setSignalFilter(e.target.value)}><option>All</option><option>Good</option><option>Weak</option><option>Poor</option><option>Critical</option></select></label><button className="primary-action" onClick={() => void pullSceneMap(heatmapPlant)} disabled={Boolean(busy)}>{busy || "Pull RDS Map"}</button></div></div><SceneMapView scene={activeSceneMap} points={heatmapPoints} amrs={state.amrs.filter((amr) => amr.plant === heatmapPlant)} /><div className="legend-row"><span><i className="legend good"></i>Good</span><span><i className="legend weak"></i>Weak</span><span><i className="legend poor"></i>Poor</span><span><i className="legend critical"></i>Critical / offline</span></div></section></section>}
-      {view === "reports" && <section className="view active-view"><div className="metric-grid">{[["Bad Zones", state.badZones.length, "Current plant scope"], ["Poor/Critical Points", state.wifiPoints.filter((p) => ["Poor", "Critical"].includes(p.quality)).length, "Wi-Fi evidence points"], ["High Severity Logs", state.logs.filter((log) => log.severity === "High").length, "Correlated events"]].map(([label, value, help]) => <article className="metric-card" key={label}><span className="metric-label">{label}</span><strong className="metric-value">{value}</strong><small className="metric-help">{help}</small></article>)}</div><section className="panel"><div className="panel-header stacked"><h2>Correlation Timeline</h2><p>Imported RDS and infrastructure evidence.</p></div><div className="timeline">{state.logs.slice().sort((a, b) => b.time.localeCompare(a.time)).map((log, index) => <article className="timeline-item" key={index}><time>{new Date(log.time).toLocaleString()}</time><div><strong>{log.topic}</strong><small>{log.plant} - {log.source} - {log.message}</small></div>{badge(log.severity)}</article>)}</div></section></section>}
-    </main>
+      {view === "discovery" && <section className="view active-view"><div className="admin-grid"><section className="panel"><div className="panel-header stacked"><h2>Wi-Fi RSSI Source</h2><p>Add the source used to collect live signal strength. Store a vault/key reference here, not a password.</p></div><form className="form-grid" onSubmit={saveWifiSource}><label className="field"><span>Plant</span><input value={wifiForm.plant} onChange={(e) => setWifiForm({ ...wifiForm, plant: e.target.value })} placeholder="Shelbyville" /></label><label className="field"><span>Source Name</span><input value={wifiForm.name} onChange={(e) => setWifiForm({ ...wifiForm, name: e.target.value })} /></label><label className="field"><span>Method</span><select value={wifiForm.method} onChange={(e) => setWifiForm({ ...wifiForm, method: e.target.value as WifiSource["method"] })}><option>AMR SSH</option><option>Controller API</option><option>Manual Import</option></select></label><label className="field"><span>Host or API</span><input value={wifiForm.host} onChange={(e) => setWifiForm({ ...wifiForm, host: e.target.value })} placeholder="amr-host or controller URL" /></label><label className="field"><span>Username</span><input value={wifiForm.username} onChange={(e) => setWifiForm({ ...wifiForm, username: e.target.value })} placeholder="read-only user" /></label><label className="field"><span>Credential Reference</span><input value={wifiForm.secretRef} onChange={(e) => setWifiForm({ ...wifiForm, secretRef: e.target.value })} placeholder="CyberArk account or SSH key path" /></label><label className="field wide-field"><span>RSSI Command or Path</span><input value={wifiForm.command} onChange={(e) => setWifiForm({ ...wifiForm, command: e.target.value })} placeholder="iw dev wlan0 link" /></label><button className="primary-action" type="submit">Save RSSI Source</button></form><div className="api-list source-list">{(state.wifiSources || []).map((source) => <article className="api-card" key={`${source.plant}-${source.name}`}><header><strong>{source.plant}</strong><span>{badge(source.method)}</span></header><div className="api-links"><span>{source.name}</span><span>Host <code>{source.host || "not set"}</code></span><span>User <code>{source.username || "not set"}</code></span><span>Credential <code>{source.secretRef || "not set"}</code></span><span>Command <code>{source.command}</code></span></div></article>)}</div></section><section className="panel"><div className="panel-header stacked"><h2>Data Discovery</h2><p>Source reliability and remaining telemetry gaps.</p></div><div className="table-wrap"><table><thead><tr><th>Data Point</th><th>Status</th><th>Best Source</th><th>Command or Path</th><th>Gap</th></tr></thead><tbody>{state.discovery.map((item) => <tr key={item.point}><td><strong>{item.point}</strong></td><td>{badge(item.status)}</td><td>{item.source}</td><td><code>{item.command}</code></td><td>{item.gap}</td></tr>)}</tbody></table></div></section></div></section>}      {view === "heatmap" && <section className="view active-view"><section className="panel heatmap-panel"><div className="panel-header"><div><h2>AMR Plant Map</h2><p>RDS scene map with live AMR connectivity zones. Hover or click an AMR for connection detail; true RSSI appears after the Discovery source is connected.</p></div><div className="heatmap-actions"><label className="field compact"><span>Map Plant</span><select value={heatmapPlant} onChange={(e) => { setSelectedImportPlant(e.target.value); setSelectedMapAmr(""); }}>{plantOptions.filter((plant) => plant !== "All").map((plant) => <option key={plant}>{plant}</option>)}</select></label><label className="field compact"><span>Signal</span><select value={signalFilter} onChange={(e) => setSignalFilter(e.target.value)}><option>All</option><option>Good</option><option>Weak</option><option>Poor</option><option>Critical</option></select></label><button className="primary-action" onClick={() => void pullSceneMap(heatmapPlant)} disabled={Boolean(busy)}>{busy || "Pull RDS Map"}</button></div></div><SceneMapView scene={activeSceneMap} points={heatmapPoints} amrs={heatmapAmrs} signalFilter={signalFilter} onSelectAmr={(name) => setSelectedMapAmr(name)} /><div className="legend-row"><span><i className="legend good"></i>Good / connected</span><span><i className="legend weak"></i>Weak / delay 80+ ms</span><span><i className="legend poor"></i>Poor / delay 150+ ms</span><span><i className="legend critical"></i>Critical / disconnected</span></div>{selectedHeatmapAmr && <div className="map-detail-card"><header><strong>{selectedHeatmapAmr.name}</strong>{badge(connectivityQuality(selectedHeatmapAmr))}</header><div className="detail-grid">{[["Status", selectedHeatmapAmr.status], ["Connection", connectivityReason(selectedHeatmapAmr)], ["Network Delay", selectedHeatmapAmr.networkDelay !== undefined ? `${selectedHeatmapAmr.networkDelay} ms` : "not reported"], ["Location", selectedHeatmapAmr.worstDrop || "unknown"], ["Battery", selectedHeatmapAmr.battery || "unknown"], ["RDS Position", selectedHeatmapAmr.rdsX !== undefined ? `x ${selectedHeatmapAmr.rdsX}, y ${selectedHeatmapAmr.rdsY}` : "unknown"]].map(([label, value]) => <article className="detail-card" key={label}><span>{label}</span><strong>{value}</strong></article>)}</div></div>}</section></section>}      {view === "reports" && <section className="view active-view"><div className="report-grid">{reportCards.map((card) => <article className="report-card" key={card.label}><span>{card.label}</span><strong>{card.value}</strong><small>{card.help}</small></article>)}</div><div className="content-grid two-col"><section className="panel"><div className="panel-header stacked"><h2>Bad Zone Summary</h2><p>Areas computed from repeated disconnects, offline AMRs, weak/poor connectivity, and reconnect evidence.</p></div><div className="zone-list">{visibleBadZones.length ? visibleBadZones.map((zone) => <article className="zone-card" key={`${zone.plant}-${zone.zone}-report`}><header><strong>{zone.zone}</strong><span>{zone.score}</span></header><small>{zone.plant} - robots {(zone.robots || []).join(", ") || "none"}</small><small>{zone.reason || "Computed from current AMR connectivity"}</small><div className="score-bar"><span style={{ width: `${Math.min(zone.score, 100)}%` }}></span></div></article>) : <article className="zone-card"><strong>No Bad Zones</strong><small>Current RDS sample does not show disconnected, weak, or poor AMR connectivity in scope.</small></article>}</div></section><section className="panel"><div className="panel-header stacked"><h2>Correlation Timeline</h2><p>Imported RDS and infrastructure evidence.</p></div><div className="timeline">{filteredLogs.slice().sort((a, b) => b.time.localeCompare(a.time)).map((log, index) => <article className="timeline-item" key={index}><time>{new Date(log.time).toLocaleString()}</time><div><strong>{log.topic}</strong><small>{log.plant} - {log.source} - {log.message}</small></div>{badge(log.severity)}</article>)}</div></section></div></section>}    </main>
   </div>;
 }
 
