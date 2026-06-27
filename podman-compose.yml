@@ -5,5 +5,7 @@ services:
       dockerfile: Containerfile
     container_name: AMR-Health
     ports:
-      - "8088:80"
+      - "8088:8090"
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped

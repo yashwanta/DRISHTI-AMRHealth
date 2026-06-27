@@ -6,5 +6,9 @@ Thumbs.db
 node_modules/
 dist/
 build/
+.gocache/
 rds-discovery/
 data/rds-snapshots/
+data/config/*
+!data/config/
+!data/config/api-connections.example.json

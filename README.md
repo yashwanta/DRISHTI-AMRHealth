@@ -1,14 +1,28 @@
 # DRISHTI - AMR Health
 
-Local dashboard for AMR health, log investigation, discovery, Wi-Fi heat maps,
-and plant configuration.
+Local Go + React dashboard for AMR health, RDS core imports, API connection management, log investigation, discovery, Wi-Fi heat maps, and plant configuration.
 
-## Run with Podman Desktop
+## Architecture
+
+```text
+React + TypeScript UI
+        |
+        v
+Go backend on localhost
+        |
+        +-- Local API connection config: data/config/api-connections.json
+        +-- Local RDS snapshots: data/rds-snapshots/
+        +-- Shelbyville / Springfield / Hopkinsville RDS core proxy
+```
+
+Raw RDS pulls and local API connection config are ignored by Git. The committed file `data/config/api-connections.example.json` is only a sanitized template.
+
+## Run With Podman
 
 ```powershell
 podman build -t drishti-amr-health .
 podman rm -f AMR-Health
-podman run -d --name AMR-Health -p 8088:80 drishti-amr-health
+podman run -d --name AMR-Health -p 8088:8090 -v ${PWD}\data:/app/data drishti-amr-health
 ```
 
 Open:
@@ -17,18 +31,32 @@ Open:
 http://localhost:8088
 ```
 
-## What is included
+## Development
 
-- AMR Health dashboard with plant filters, bad-zone ranking, and AMR detail view
-- Log investigation page with topic, severity, source, server, VM, AMR, and date filters
-- Discovery page for AMR position, RSSI, AP/BSSID, SSID, channel, band, reconnect,
-  offline, Roboshop/RDS, Fleet Manager, Ubuntu, Proxmox, and VM data
-- AMR Wi-Fi heat map with signal, disconnect, reconnect, offline, and roaming overlays
-- Admin configuration for plants, AMRs, Fleet Manager servers, log sources,
-  custom troubleshooting commands, and RSSI thresholds
-- Historical report views for worst AMRs, bad zones, AP/roaming issues, and
-  correlated infrastructure events
+Backend:
 
-The first version uses browser local storage and seeded sample data so the app is
-usable immediately. Discovery is intentionally explicit about which data points
-are available, partial, or missing before the heat map is treated as reliable.
+```powershell
+$env:GOCACHE = "$PWD\.gocache"
+go run ./backend
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+## Local API Routes
+
+```text
+GET  /api/health
+GET  /api/connections
+POST /api/connections
+PUT  /api/connections
+GET  /api/plants/{plant}/rds/core?save=1
+GET  /api/plants/{plant}/rds/scene?save=1
+```
+
+Use `Admin > RDS API Connections` to manage plant URLs locally. Use `Admin > RDS Core Import` to pull live RDS core data through Go or import a saved JSON response.

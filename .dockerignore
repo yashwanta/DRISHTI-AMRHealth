@@ -1,0 +1,9 @@
+.git
+.gocache
+.agents
+rds-discovery
+frontend/node_modules
+frontend/dist
+data/config/api-connections.json
+data/rds-snapshots
+*.log

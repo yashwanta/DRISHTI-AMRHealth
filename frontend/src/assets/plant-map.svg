@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Sample plant floor layout</title>
+  <desc id="desc">Dark industrial floor map with zones, aisles, docks, and production cells.</desc>
+  <rect width="1200" height="700" fill="#111827"/>
+  <rect x="40" y="40" width="1120" height="620" rx="22" fill="#182033" stroke="#334155" stroke-width="3"/>
+  <g fill="#202b42" stroke="#475569" stroke-width="2">
+    <rect x="90" y="90" width="230" height="150" rx="10"/>
+    <rect x="360" y="90" width="260" height="150" rx="10"/>
+    <rect x="660" y="90" width="210" height="150" rx="10"/>
+    <rect x="910" y="90" width="190" height="150" rx="10"/>
+    <rect x="90" y="300" width="270" height="130" rx="10"/>
+    <rect x="420" y="300" width="250" height="130" rx="10"/>
+    <rect x="740" y="300" width="360" height="130" rx="10"/>
+    <rect x="90" y="500" width="260" height="100" rx="10"/>
+    <rect x="410" y="500" width="300" height="100" rx="10"/>
+    <rect x="780" y="500" width="320" height="100" rx="10"/>
+  </g>
+  <g stroke="#64748b" stroke-width="2" stroke-dasharray="10 10" opacity="0.7">
+    <path d="M60 270 H1140"/>
+    <path d="M60 465 H1140"/>
+    <path d="M385 70 V630"/>
+    <path d="M715 70 V630"/>
+  </g>
+  <g fill="#94a3b8" font-family="Arial, sans-serif" font-size="28" font-weight="700">
+    <text x="142" y="175">Zone A</text>
+    <text x="444" y="175">Roboshop</text>
+    <text x="704" y="175">Dock</text>
+    <text x="956" y="175">RDS</text>
+    <text x="142" y="378">Assembly</text>
+    <text x="478" y="378">Core</text>
+    <text x="860" y="378">Outbound</text>
+    <text x="146" y="562">Charge</text>
+    <text x="488" y="562">Fleet</text>
+    <text x="872" y="562">Shipping</text>
+  </g>
+  <g fill="#38bdf8" opacity="0.75">
+    <circle cx="170" cy="270" r="7"/>
+    <circle cx="520" cy="270" r="7"/>
+    <circle cx="850" cy="270" r="7"/>
+    <circle cx="290" cy="465" r="7"/>
+    <circle cx="610" cy="465" r="7"/>
+    <circle cx="980" cy="465" r="7"/>
+  </g>
+</svg>

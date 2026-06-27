@@ -1,0 +1,8 @@
+[
+  {
+    "plant": "ExamplePlant",
+    "baseUrl": "http://rds-host:8080",
+    "corePath": "/api/agv-report/core",
+    "scenePath": "/api/display-scene"
+  }
+]

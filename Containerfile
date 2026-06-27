@@ -1,11 +1,26 @@
-FROM docker.io/library/nginx:1.27-alpine
+FROM docker.io/library/node:24-alpine AS frontend
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
 
+FROM docker.io/library/golang:1.25-alpine AS backend
+WORKDIR /src
+COPY go.mod ./
+COPY backend ./backend
+RUN go build -o /out/drishti-amr-health ./backend
+
+FROM docker.io/library/alpine:3.21
 LABEL org.opencontainers.image.title="DRISHTI - AMR Health"
-LABEL org.opencontainers.image.description="Local AMR health, discovery, log investigation, and Wi-Fi heat map dashboard"
-
-COPY index.html /usr/share/nginx/html/index.html
-COPY styles.css /usr/share/nginx/html/styles.css
-COPY app.js /usr/share/nginx/html/app.js
-COPY assets /usr/share/nginx/html/assets
-
-EXPOSE 80
+LABEL org.opencontainers.image.description="Local Go and React AMR health dashboard with RDS proxy"
+WORKDIR /app
+COPY --from=backend /out/drishti-amr-health /app/drishti-amr-health
+COPY --from=frontend /src/frontend/dist /app/frontend/dist
+COPY data/config/api-connections.example.json /app/data/config/api-connections.example.json
+ENV PORT=8090
+ENV DRISHTI_STATIC_DIR=/app/frontend/dist
+ENV DRISHTI_API_CONFIG=/app/data/config/api-connections.json
+VOLUME ["/app/data"]
+EXPOSE 8090
+CMD ["/app/drishti-amr-health"]
