@@ -252,6 +252,19 @@
             </div>
             <div class="threshold-note" id="rdsImportNote">No RDS core JSON imported yet. Choose a plant, then import the matching core JSON.</div>
           </section>
+          <section class="panel wide-panel">
+            <div class="panel-header stacked"><h2>RDS API Connections</h2><p>Manage plant RDS base URLs, core feed paths, and scene endpoints from one place.</p></div>
+            <form id="apiConnectionForm" class="form-grid">
+              <label class="field"><span>Plant</span><input name="plant" list="apiPlantOptions" required placeholder="Hopkinsville"></label>
+              <datalist id="apiPlantOptions"></datalist>
+              <label class="field"><span>Base URL</span><input name="baseUrl" required placeholder="http://10.216.4.59:8080"></label>
+              <label class="field"><span>Core Path</span><input name="corePath" required value="/api/agv-report/core"></label>
+              <label class="field"><span>Scene Path</span><input name="scenePath" required value="/api/display-scene"></label>
+              <button class="primary-action" type="submit">Save Connection</button>
+              <button class="ghost-action" id="resetApiConnections" type="button">Reset Defaults</button>
+            </form>
+            <div id="apiConnectionList" class="api-list"></div>
+          </section>
           <section class="panel">
             <div class="panel-header stacked"><h2>Plants</h2><p>Add plants, Fleet Manager servers, Roboshop Core, and log source paths.</p></div>
             <form id="plantForm" class="form-grid">

@@ -1,5 +1,10 @@
 const STORAGE_KEY = "drishti-amr-health-v1";
 const RDS_PLANT_HOSTS = { Shelbyville: "10.205.22.12", Springfield: "10.222.10.76", Hopkinsville: "10.216.4.59" };
+const RDS_DEFAULT_API_CONNECTIONS = [
+  { plant: "Shelbyville", baseUrl: "http://10.205.22.12:8080", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" },
+  { plant: "Springfield", baseUrl: "http://10.222.10.76:8080", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" },
+  { plant: "Hopkinsville", baseUrl: "http://10.216.4.59:8080", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" }
+];
 const topics = [
   "Robot offline / disconnect", "Application crash", "Ubuntu server reboot", "Ubuntu server shutdown", "Ubuntu log gap",
   "VM stopped", "VM started", "VM reboot", "VM killed by OOM", "Host memory exhaustion", "Swap full",
@@ -12,6 +17,7 @@ const topics = [
 
 const seed = {
   thresholds: { good: -60, weak: -70, poor: -80, interval: 60 },
+  apiConnections: structuredClone(RDS_DEFAULT_API_CONNECTIONS),
   plants: [
     { id: "shelbyville", name: "Shelbyville", fleetManager: "shv-fleet-ubuntu01", roboshop: "shv-roboshop-core:9443", logPath: "/var/log/roboshop" },
     { id: "springfield", name: "Springfield", fleetManager: "spf-fleet-ubuntu01", roboshop: "spf-roboshop-core:9443", logPath: "/data/rds/logs" },
@@ -77,24 +83,50 @@ const searchText = () => $("#globalSearch").value.trim().toLowerCase();
 const plantMatches = (plant) => selectedPlant() === "All" || plant === selectedPlant();
 const textMatches = (item) => !searchText() || JSON.stringify(item).toLowerCase().includes(searchText());
 
+function mergeApiConnections(savedConnections = []) {
+  const byPlant = new Map(RDS_DEFAULT_API_CONNECTIONS.map((connection) => [connection.plant, { ...connection }]));
+  savedConnections.filter(Boolean).forEach((connection) => {
+    const plant = String(connection.plant || "").trim();
+    if (!plant) return;
+    byPlant.set(plant, { ...byPlant.get(plant), ...connection, plant });
+  });
+  return [...byPlant.values()].sort((a, b) => a.plant.localeCompare(b.plant));
+}
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return saved ? { ...structuredClone(seed), ...saved } : structuredClone(seed);
+    if (!saved) return structuredClone(seed);
+    const merged = { ...structuredClone(seed), ...saved };
+    merged.apiConnections = mergeApiConnections(saved.apiConnections || []);
+    return merged;
   } catch (_) {
     return structuredClone(seed);
   }
 }
 function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 function unique(values) { return [...new Set(values.filter(Boolean))].sort(); }
-function knownPlantNames() { return unique([...state.plants.map((plant) => plant.name), ...state.amrs.map((amr) => amr.plant), ...state.logs.map((log) => log.plant), ...state.wifiPoints.map((point) => point.plant), ...Object.keys(RDS_PLANT_HOSTS)]); }
+function normalizeApiPath(path, fallback) {
+  const value = String(path || fallback).trim() || fallback;
+  return value.startsWith("/") ? value : `/${value}`;
+}
+function normalizeBaseUrl(url) { return String(url || "").trim().replace(/\/+$/, ""); }
+function knownPlantNames() { return unique([...state.plants.map((plant) => plant.name), ...state.amrs.map((amr) => amr.plant), ...state.logs.map((log) => log.plant), ...state.wifiPoints.map((point) => point.plant), ...(state.apiConnections || []).map((connection) => connection.plant), ...Object.keys(RDS_PLANT_HOSTS)]); }
+function apiConnectionForPlant(plant) { return (state.apiConnections || []).find((connection) => connection.plant === plant) || RDS_DEFAULT_API_CONNECTIONS.find((connection) => connection.plant === plant); }
+function apiUrlFor(connection, pathKey) {
+  const baseUrl = normalizeBaseUrl(connection?.baseUrl);
+  const path = normalizeApiPath(connection?.[pathKey], pathKey === "scenePath" ? "/api/display-scene" : "/api/agv-report/core");
+  return baseUrl ? `${baseUrl}${path}` : path;
+}
 function matchFilter(filter, value) { return filter === "All" || filter === value; }
 function countBy(items, key) { return items.reduce((acc, item) => { acc[item[key]] = (acc[item[key]] || 0) + 1; return acc; }, {}); }
 function escapeHtml(value) { return String(value).replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char])); }
 function escapeAttr(value) { return escapeHtml(value).replace(/'/g, "&#39;"); }
 function badge(value) { const klass = String(value).toLowerCase().replace(/\s+/g, "-"); return `<span class="badge ${klass}">${escapeHtml(value)}</span>`; }
 function formatTime(value) { return new Date(value).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
-function rdsHostForPlant(plant) { return RDS_PLANT_HOSTS[plant] || "RDS host not configured"; }
+function rdsHostForPlant(plant) {
+  const connection = apiConnectionForPlant(plant);
+  try { return new URL(normalizeBaseUrl(connection?.baseUrl)).hostname; } catch (_) { return RDS_PLANT_HOSTS[plant] || "RDS host not configured"; }
+}
 
 function init() {
   bindNavigation();
@@ -139,7 +171,7 @@ function populateGlobalFilters() {
   const plantOptions = knownPlantNames();
   setOptions($("#globalPlantFilter"), ["All", ...plantOptions], current);
   const amrSelect = $('#amrForm select[name="plant"]');
-  setOptions(amrSelect, state.plants.map((plant) => plant.name), amrSelect.value || state.plants[0]?.name);
+  setOptions(amrSelect, plantOptions, amrSelect.value || state.plants[0]?.name);
   const rdsImportPlant = $("#rdsImportPlant");
   if (rdsImportPlant) setOptions(rdsImportPlant, plantOptions, rdsImportPlant.value || "Shelbyville");
 }
@@ -293,6 +325,15 @@ function renderReports() {
   $("#correlationTimeline").innerHTML = state.logs.filter((log) => plantMatches(log.plant)).sort((a, b) => b.time.localeCompare(a.time)).map((log) => `<article class="timeline-item"><time>${formatTime(log.time)}</time><div><strong>${escapeHtml(log.topic)}</strong><small>${escapeHtml(log.plant)} - ${escapeHtml(log.source)} - ${escapeHtml(log.message)}</small></div>${badge(log.severity)}</article>`).join("");
 }
 function renderAdmin() {
+  const connections = mergeApiConnections(state.apiConnections || []);
+  state.apiConnections = connections;
+  const apiPlantOptions = $("#apiPlantOptions");
+  if (apiPlantOptions) apiPlantOptions.innerHTML = knownPlantNames().map((plant) => `<option value="${escapeAttr(plant)}"></option>`).join("");
+  $("#apiConnectionList").innerHTML = connections.map((connection) => {
+    const coreUrl = apiUrlFor(connection, "corePath");
+    const sceneUrl = apiUrlFor(connection, "scenePath");
+    return `<article class="api-card"><header><strong>${escapeHtml(connection.plant)}</strong><button class="row-action" type="button" data-edit-api="${escapeAttr(connection.plant)}">Edit</button></header><div class="api-links"><span>Base <code>${escapeHtml(normalizeBaseUrl(connection.baseUrl))}</code></span><span>Core <a href="${escapeAttr(coreUrl)}" target="_blank" rel="noreferrer">${escapeHtml(coreUrl)}</a></span><span>Scene <a href="${escapeAttr(sceneUrl)}" target="_blank" rel="noreferrer">${escapeHtml(sceneUrl)}</a></span><span>Pull <code>.\\scripts\\pull-rds-core.ps1 -Plant ${escapeHtml(connection.plant)}</code></span></div></article>`;
+  }).join("");
   $("#plantAdminList").innerHTML = state.plants.map((plant) => `<article class="admin-card"><div><strong>${escapeHtml(plant.name)}</strong><small>${escapeHtml(plant.fleetManager)} - ${escapeHtml(plant.roboshop)} - ${escapeHtml(plant.logPath)}</small></div><button class="delete-action" data-delete-plant="${escapeAttr(plant.name)}">Remove</button></article>`).join("");
   $("#amrAdminList").innerHTML = state.amrs.map((amr) => `<article class="admin-card"><div><strong>${escapeHtml(amr.name)}</strong><small>${escapeHtml(amr.plant)} - ${escapeHtml(amr.ip)} - ${escapeHtml(amr.status)}</small></div><button class="delete-action" data-delete-amr="${escapeAttr(amr.id)}">Remove</button></article>`).join("");
   $('#thresholdForm input[name="good"]').value = state.thresholds.good;
@@ -303,6 +344,7 @@ function renderAdmin() {
   $("#rdsImportNote").textContent = state.rdsImportNote || "No RDS core JSON imported yet.";
   $$('[data-delete-plant]').forEach((button) => button.addEventListener("click", () => deletePlant(button.dataset.deletePlant)));
   $$('[data-delete-amr]').forEach((button) => button.addEventListener("click", () => deleteAmr(button.dataset.deleteAmr)));
+  $$('[data-edit-api]').forEach((button) => button.addEventListener("click", () => editApiConnection(button.dataset.editApi)));
 }
 function setDiscoveryPoint(point, status, source, command, gap) {
   state.discovery = state.discovery.map((item) => item.point === point ? { ...item, status, source, command, gap } : item);
@@ -500,6 +542,17 @@ function bindForms() {
     saveState();
     refreshAll();
   });
+  $("#apiConnectionForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    saveApiConnection(data);
+    event.currentTarget.reset();
+  });
+  $("#resetApiConnections").addEventListener("click", () => {
+    state.apiConnections = structuredClone(RDS_DEFAULT_API_CONNECTIONS);
+    saveState();
+    refreshAll();
+  });
   $("#commandForm").addEventListener("submit", (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -533,6 +586,25 @@ function handleMapUpload(event) {
   const reader = new FileReader();
   reader.onload = () => { state.uploadedMap = reader.result; saveState(); renderHeatMap(); };
   reader.readAsDataURL(file);
+}
+function saveApiConnection(data) {
+  const plant = String(data.plant || "").trim();
+  const baseUrl = normalizeBaseUrl(data.baseUrl);
+  if (!plant || !baseUrl) return;
+  const connection = { plant, baseUrl, corePath: normalizeApiPath(data.corePath, "/api/agv-report/core"), scenePath: normalizeApiPath(data.scenePath, "/api/display-scene") };
+  state.apiConnections = mergeApiConnections([...(state.apiConnections || []).filter((item) => item.plant !== plant), connection]);
+  saveState();
+  refreshAll();
+}
+function editApiConnection(plant) {
+  const connection = apiConnectionForPlant(plant);
+  if (!connection) return;
+  const form = $("#apiConnectionForm");
+  form.elements.plant.value = connection.plant;
+  form.elements.baseUrl.value = normalizeBaseUrl(connection.baseUrl);
+  form.elements.corePath.value = normalizeApiPath(connection.corePath, "/api/agv-report/core");
+  form.elements.scenePath.value = normalizeApiPath(connection.scenePath, "/api/display-scene");
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 function deletePlant(name) { state.plants = state.plants.filter((plant) => plant.name !== name); saveState(); refreshAll(); }
 function deleteAmr(id) { state.amrs = state.amrs.filter((amr) => amr.id !== id); saveState(); refreshAll(); }

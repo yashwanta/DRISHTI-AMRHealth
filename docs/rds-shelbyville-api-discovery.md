@@ -187,6 +187,15 @@ Helper scripts are available:
 ```
 
 Snapshots are written under `data/rds-snapshots/`, which is ignored by Git.
+## RDS API Links
+
+| Plant | Base URL | Core feed | Scene endpoint |
+| --- | --- | --- | --- |
+| Shelbyville | `http://10.205.22.12:8080` | `http://10.205.22.12:8080/api/agv-report/core` | `http://10.205.22.12:8080/api/display-scene` |
+| Springfield | `http://10.222.10.76:8080` | `http://10.222.10.76:8080/api/agv-report/core` | `http://10.222.10.76:8080/api/display-scene` |
+| Hopkinsville | `http://10.216.4.59:8080` | `http://10.216.4.59:8080/api/agv-report/core` | `http://10.216.4.59:8080/api/display-scene` |
+
+These links are also visible in DRISHTI AMR Health under `Admin` > `RDS API Connections`. Changes made there are saved to browser localStorage on the local machine.
 
 ## Springfield RDS Core Endpoint
 
