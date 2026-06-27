@@ -172,12 +172,21 @@ function renderAmrDetail(id) {
   const recentLogs = state.logs.filter((log) => log.amr === amr.name).slice(0, 3).map((log) => `${log.topic}: ${log.message}`).join(" | ") || "No logs found";
   const points = state.wifiPoints.filter((point) => point.amr === amr.name);
   $("#amrDetailContent").classList.remove("empty-state");
-  $("#amrDetailContent").innerHTML = [
+  const detailRows = [
     ["Status", badge(amr.status)], ["Wi-Fi", `${amr.rssi} dBm via ${escapeHtml(amr.ap)}`],
     ["Disconnect History", `${amr.disconnects} disconnects, ${amr.reconnects} reconnects`], ["Offline History", escapeHtml(amr.offline)],
     ["Heat Map Points", `${points.length} correlated positions`], ["SSID / Channel", `${escapeHtml(amr.ssid)} ch ${escapeHtml(amr.channel)} ${escapeHtml(amr.band)}`],
     ["Worst Drop", escapeHtml(amr.worstDrop)], ["Recent Logs", escapeHtml(recentLogs)]
-  ].map(([label, value]) => `<article class="detail-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
+  ];
+  if (amr.source) detailRows.push(["Source", escapeHtml(amr.source)]);
+  if (amr.battery) detailRows.push(["Battery", escapeHtml(amr.battery)]);
+  if (amr.rdsX !== undefined && amr.rdsY !== undefined) detailRows.push(["RDS Position", `x ${escapeHtml(amr.rdsX)}, y ${escapeHtml(amr.rdsY)}, angle ${escapeHtml(amr.rdsAngle ?? "unknown")}`]);
+  if (amr.currentStation) detailRows.push(["Current Station", escapeHtml(amr.currentStation)]);
+  if (amr.currentArea) detailRows.push(["Current Area", escapeHtml(amr.currentArea || "none")]);
+  if (amr.mapMd5 || amr.modelMd5) detailRows.push(["RDS Map / Model", `${escapeHtml(amr.currentMap || "unknown")} / ${escapeHtml(amr.modelMd5 || "unknown")}`]);
+  if (amr.confidence !== undefined || amr.networkDelay !== undefined) detailRows.push(["Confidence / Delay", `${escapeHtml(amr.confidence ?? "unknown")} / ${escapeHtml(amr.networkDelay ?? "unknown")} ms`]);
+  if (amr.issue) detailRows.push(["RDS Issue", escapeHtml(amr.issue)]);
+  $("#amrDetailContent").innerHTML = detailRows.map(([label, value]) => `<article class="detail-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
   $("#amrDetailPanel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -285,8 +294,183 @@ function renderAdmin() {
   $('#thresholdForm input[name="poor"]').value = state.thresholds.poor;
   $('#thresholdForm input[name="interval"]').value = state.thresholds.interval;
   $("#thresholdNote").textContent = `Good: ${state.thresholds.good} dBm and stronger. Weak: ${state.thresholds.weak} to ${state.thresholds.good - 1}. Poor: ${state.thresholds.poor} to ${state.thresholds.weak - 1}. Critical: disconnect/offline or below ${state.thresholds.poor}.`;
+  $("#rdsImportNote").textContent = state.rdsImportNote || "No RDS core JSON imported yet.";
   $$('[data-delete-plant]').forEach((button) => button.addEventListener("click", () => deletePlant(button.dataset.deletePlant)));
   $$('[data-delete-amr]').forEach((button) => button.addEventListener("click", () => deleteAmr(button.dataset.deleteAmr)));
+}
+function setDiscoveryPoint(point, status, source, command, gap) {
+  state.discovery = state.discovery.map((item) => item.point === point ? { ...item, status, source, command, gap } : item);
+}
+function normalizeRdsCoreResponse(payload, plant = "Shelbyville") {
+  const core = payload?.data;
+  const reports = Array.isArray(core?.report) ? core.report : [];
+  if (!core || reports.length === 0) throw new Error("No data.report array found in RDS core JSON.");
+  const positions = reports.map((item) => item.rbk_report).filter(Boolean).filter((rbk) => Number.isFinite(Number(rbk.x)) && Number.isFinite(Number(rbk.y)));
+  const xs = positions.map((rbk) => Number(rbk.x));
+  const ys = positions.map((rbk) => Number(rbk.y));
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const scale = (value, min, max) => max === min ? 50 : 10 + ((Number(value) - min) / (max - min)) * 80;
+  const importedAt = new Date().toISOString();
+  const source = "Shelbyville RDS Core";
+  const amrs = reports.map((item) => {
+    const rbk = item.rbk_report || {};
+    const basic = item.basic_info || {};
+    const reason = item.undispatchable_reason || {};
+    const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
+    const disconnected = Number(item.connection_status) === 0 || reason.disconnect === true;
+    const emergency = rbk.emergency === true;
+    const status = disconnected ? "Disconnected" : "Online";
+    const warnings = [...(item.warnings || []), ...(rbk.warnings || []), ...(rbk.alarms?.warnings || [])];
+    const errors = [...(item.errors || []), ...(rbk.errors || []), ...(rbk.alarms?.errors || [])];
+    const currentArea = (basic.current_area || []).join(", ");
+    const currentStation = rbk.current_station || item.current_order?.blocks?.[0]?.location || "No station reported";
+    const issue = disconnected ? "RDS reports robot disconnected" : emergency ? "Emergency stop active" : errors.length ? "RDS error present" : warnings.length ? warnings[0].desc || warnings[0].describe || "RDS warning present" : "No active RDS issue";
+    return {
+      id: `rds-${slug(name)}`,
+      name,
+      plant,
+      ip: basic.ip || "unknown",
+      status,
+      reconnects: 0,
+      disconnects: disconnected ? 1 : 0,
+      offline: disconnected ? "Disconnected now" : "0m",
+      worstDrop: currentStation || currentArea || `x ${rbk.x}, y ${rbk.y}`,
+      rssi: -60,
+      ap: "RDS Core position only",
+      ssid: "unknown",
+      channel: "unknown",
+      band: "unknown",
+      imported: true,
+      source,
+      battery: Number.isFinite(Number(rbk.battery_level)) ? `${Math.round(Number(rbk.battery_level) * 100)}%` : "unknown",
+      rdsX: rbk.x,
+      rdsY: rbk.y,
+      rdsAngle: rbk.angle,
+      currentStation,
+      currentArea,
+      currentMap: rbk.current_map || basic.current_map || "unknown",
+      mapMd5: rbk.current_map_md5 || core.scene_md5 || "unknown",
+      modelMd5: core.model_md5 || "unknown",
+      confidence: rbk.confidence,
+      networkDelay: item.network_delay,
+      dispatchable: item.dispatchable === true,
+      emergency,
+      issue,
+      importedAt
+    };
+  });
+  const points = reports.map((item) => {
+    const rbk = item.rbk_report || {};
+    const basic = item.basic_info || {};
+    const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
+    const disconnected = Number(item.connection_status) === 0 || item.undispatchable_reason?.disconnect === true;
+    const critical = disconnected || rbk.emergency === true || item.is_error === true;
+    const x = Number.isFinite(Number(rbk.x)) ? scale(rbk.x, minX, maxX) : 50;
+    const y = Number.isFinite(Number(rbk.y)) ? scale(rbk.y, minY, maxY) : 50;
+    return {
+      plant,
+      amr: name,
+      x: Math.max(5, Math.min(95, x)),
+      y: Math.max(5, Math.min(95, y)),
+      rssi: -60,
+      quality: critical ? "Critical" : "Good",
+      ap: "RDS Core position only",
+      ssid: "unknown",
+      channel: "unknown",
+      band: "unknown",
+      reconnect: false,
+      disconnect: disconnected,
+      offline: disconnected,
+      roaming: false,
+      time: core.create_on || importedAt,
+      imported: true,
+      source,
+      rdsX: rbk.x,
+      rdsY: rbk.y,
+      station: rbk.current_station || item.current_order?.blocks?.[0]?.location || "unknown",
+      map: rbk.current_map || basic.current_map || "unknown"
+    };
+  });
+  const logs = [];
+  [...(core.warnings || []), ...(core.alarms?.warnings || [])].forEach((warning, index) => logs.push({
+    time: core.create_on || importedAt,
+    plant,
+    amr: warning.desc?.match(/\[(.*?)\]/)?.[1] || "RDS Core",
+    server: "10.205.22.12",
+    host: "Shelbyville RDS",
+    vm: "",
+    source: "RDS Core",
+    category: "RDS",
+    severity: "High",
+    topic: "RDS Core issue",
+    message: warning.desc || warning.describe || `RDS warning ${warning.code || index}`,
+    imported: true
+  }));
+  reports.forEach((item) => {
+    const rbk = item.rbk_report || {};
+    const name = item.uuid || item.vehicle_id || item.current_order?.vehicle || "Unknown AMR";
+    const warnings = [...(item.warnings || []), ...(rbk.warnings || []), ...(rbk.alarms?.warnings || [])];
+    const disconnected = Number(item.connection_status) === 0 || item.undispatchable_reason?.disconnect === true;
+    if (disconnected) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "RDS Core", category: "AMR", severity: "High", topic: "Robot offline / disconnect", message: `${name} is disconnected in RDS core feed. IP ${item.basic_info?.ip || "unknown"}.`, imported: true });
+    if (rbk.emergency) logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "AMR Robot", category: "AMR", severity: "High", topic: "Application crash", message: `${name} reports emergency stop active.`, imported: true });
+    warnings.forEach((warning) => logs.push({ time: core.create_on || importedAt, plant, amr: name, server: "10.205.22.12", host: "Shelbyville RDS", vm: "", source: "AMR Robot", category: "AMR", severity: item.is_error ? "High" : "Medium", topic: "RDS Core issue", message: warning.desc || warning.describe || `RDS warning ${warning.code || "unknown"}`, imported: true }));
+  });
+  return {
+    amrs,
+    points,
+    logs,
+    summary: {
+      plant,
+      source,
+      importedAt,
+      createdOn: core.create_on || "unknown",
+      modelMd5: core.model_md5 || "unknown",
+      sceneMd5: core.scene_md5 || "unknown",
+      robots: amrs.length,
+      disconnected: amrs.filter((amr) => amr.status === "Disconnected").length,
+      warnings: logs.length
+    }
+  };
+}
+function mergeRdsCoreImport(normalized) {
+  const source = normalized.summary.source;
+  state.amrs = state.amrs.filter((item) => !(item.imported && item.source === source)).concat(normalized.amrs);
+  state.wifiPoints = state.wifiPoints.filter((item) => !(item.imported && item.source === source)).concat(normalized.points);
+  state.logs = state.logs.filter((item) => !(item.imported && item.source === source)).concat(normalized.logs);
+  state.rdsImportNote = `Imported ${normalized.summary.robots} Shelbyville AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`;
+  setDiscoveryPoint("AMR live position", "Available", "RDS Core", "GET /api/agv-report/core", "Imported robot live status and position from Shelbyville core feed");
+  setDiscoveryPoint("AMR map X/Y coordinates", "Available", "RDS Core", "rbk_report.x / rbk_report.y", "Coordinates imported; map scale still needs scene geometry alignment");
+  setDiscoveryPoint("Disconnect and reconnect events", "Partial", "RDS Core", "connection_status and undispatchable_reason.disconnect", "Disconnect state is available; reconnect count still needs historical logs");
+  setDiscoveryPoint("RDS map and model data", "Available", "RDS Core", "model_md5, scene_md5, current_map_md5", "Map/model metadata imported from core feed");
+}
+function handleRdsCoreImport(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const payload = JSON.parse(reader.result);
+      const normalized = normalizeRdsCoreResponse(payload, "Shelbyville");
+      mergeRdsCoreImport(normalized);
+      saveState();
+      refreshAll();
+      showView("dashboard");
+    } catch (error) {
+      state.rdsImportNote = `Import failed: ${error.message}`;
+      renderAdmin();
+    } finally {
+      event.target.value = "";
+    }
+  };
+  reader.readAsText(file);
+}
+function resetImportedRdsData() {
+  state.amrs = state.amrs.filter((item) => !item.imported);
+  state.wifiPoints = state.wifiPoints.filter((item) => !item.imported);
+  state.logs = state.logs.filter((item) => !item.imported);
+  state.rdsImportNote = "Imported RDS data cleared.";
+  saveState();
+  refreshAll();
 }
 function bindForms() {
   $("#plantForm").addEventListener("submit", (event) => {
@@ -321,6 +505,8 @@ function bindForms() {
     renderAdmin();
   });
   $("#mapUpload").addEventListener("change", handleMapUpload);
+  $("#rdsCoreImport").addEventListener("change", handleRdsCoreImport);
+  $("#resetImportedRds").addEventListener("click", resetImportedRdsData);
   $("#resetMap").addEventListener("click", () => { state.uploadedMap = ""; saveState(); renderHeatMap(); });
   $("#runDiscovery").addEventListener("click", runDiscovery);
   $("#refreshDashboard").addEventListener("click", renderDashboard);

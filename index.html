@@ -241,6 +241,17 @@
       <section id="admin" class="view">
         <div class="admin-grid">
           <section class="panel">
+            <div class="panel-header stacked"><h2>Shelbyville RDS Core Import</h2><p>Import a saved `/api/agv-report/core` JSON response to update AMR status, RDS position points, alarms, model MD5, and discovery evidence.</p></div>
+            <div class="import-actions">
+              <label class="file-action">
+                Import Core JSON
+                <input id="rdsCoreImport" type="file" accept=".json,application/json">
+              </label>
+              <button class="ghost-action" id="resetImportedRds" type="button">Reset Imported Data</button>
+            </div>
+            <div class="threshold-note" id="rdsImportNote">No RDS core JSON imported yet.</div>
+          </section>
+          <section class="panel">
             <div class="panel-header stacked"><h2>Plants</h2><p>Add plants, Fleet Manager servers, Roboshop Core, and log source paths.</p></div>
             <form id="plantForm" class="form-grid">
               <label class="field"><span>Plant Name</span><input name="name" required placeholder="Shelbyville"></label>

@@ -182,7 +182,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .discovery-card span { color: var(--muted); font-size: 12px; }
 
 .heatmap-panel { overflow: hidden; }
-.heatmap-actions, .heatmap-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.heatmap-actions, .heatmap-controls, .import-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .heatmap-controls { margin-bottom: 14px; }
 .map-shell { position: relative; width: 100%; aspect-ratio: 12 / 7; min-height: 360px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #0f172a; }
 .map-shell img { width: 100%; height: 100%; object-fit: cover; display: block; }

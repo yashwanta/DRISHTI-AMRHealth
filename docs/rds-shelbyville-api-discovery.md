@@ -137,3 +137,50 @@ Once credentials are available, the connector should:
 3. Pull `/api/display-scene` and `/api/agv-report/core` first.
 4. Pull worksite and robot inventory endpoints.
 5. Save sanitized snapshots into DRISHTI AMR Health for map, AMR, and bad-zone correlation.
+
+## Core Feed Field Mapping Confirmed From Sample
+
+The `/api/agv-report/core` response can directly populate DRISHTI AMR Health:
+
+- AMR name: `report[].uuid` or `report[].vehicle_id`
+- IP address: `report[].basic_info.ip`
+- Online/disconnected: `report[].connection_status` plus `report[].undispatchable_reason.disconnect`
+- Current station: `report[].rbk_report.current_station` or current order block location
+- Current area: `report[].basic_info.current_area[]`
+- RDS X/Y position: `report[].rbk_report.x`, `report[].rbk_report.y`
+- Heading: `report[].rbk_report.angle`
+- Battery: `report[].rbk_report.battery_level`
+- Confidence: `report[].rbk_report.confidence`
+- Network delay: `report[].network_delay`
+- Emergency stop: `report[].rbk_report.emergency`
+- Robot warnings/errors: `report[].rbk_report.alarms`, `report[].rbk_report.warnings`
+- Core warnings: `data.alarms.warnings` and `data.warnings`
+- Map/model metadata: `data.model_md5`, `data.scene_md5`, `report[].rbk_report.current_map_md5`
+
+From the first Shelbyville sample, DRISHTI can identify:
+
+- `AMR-02` as disconnected, battery 36%, station `PP10`, IP `10.215.48.167`
+- `AMR-01` as online, battery 80%, station `PP91`, area `Area-01`, IP `10.215.48.171`
+
+Wi-Fi RSSI/AP/SSID/channel/band are still missing from this feed. RDS provides reliable robot position and status, but Wi-Fi correlation still needs AMR Linux Wi-Fi telemetry, controller data, or logs.
+
+## Local Import Flow
+
+DRISHTI AMR Health now supports importing this JSON directly:
+
+1. Save a `/api/agv-report/core` response as `.json`.
+2. Open DRISHTI AMR Health.
+3. Go to `Admin`.
+4. Use `Shelbyville RDS Core Import`.
+5. Import the JSON file.
+
+The app normalizes AMR rows, RDS position points, evidence logs, and discovery status. Raw plant snapshots should stay local and should not be committed.
+
+A helper script is available:
+
+```powershell
+.\scripts\pull-shelbyville-rds.ps1
+.\scripts\pull-shelbyville-rds.ps1 -IncludeScene
+```
+
+Snapshots are written under `data/rds-snapshots/`, which is ignored by Git.
