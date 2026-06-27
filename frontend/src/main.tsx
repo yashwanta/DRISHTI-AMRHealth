@@ -22,37 +22,20 @@ type AppState = {
 };
 type NormalizedRds = { amrs: AMR[]; points: WifiPoint[]; logs: LogEntry[]; summary: { plant: string; source: string; createdOn: string; modelMd5: string; sceneMd5: string; robots: number; disconnected: number } };
 
-const STORAGE_KEY = "drishti-amr-health-react-v1";
+const STORAGE_KEY = "drishti-amr-health-react-v2";
+const LEGACY_STORAGE_KEYS = ["drishti-amr-health-react-v1", "drishti-amr-health-state"];
 const seed: AppState = {
-  amrs: [
-    { id: "shv-amr-01", name: "SHV-AMR-01", plant: "Shelbyville", ip: "10.24.12.41", status: "Online", reconnects: 4, disconnects: 1, offline: "0m", worstDrop: "Assembly north aisle", rssi: -58, ap: "AP-SHV-A12", ssid: "AMR-Fleet", channel: "44", band: "5 GHz" },
-    { id: "shv-amr-02", name: "SHV-AMR-02", plant: "Shelbyville", ip: "10.24.12.42", status: "Disconnected", reconnects: 18, disconnects: 7, offline: "14m", worstDrop: "Dock door 3", rssi: -76, ap: "AP-SHV-D03", ssid: "AMR-Fleet", channel: "149", band: "5 GHz" },
-    { id: "spf-amr-07", name: "SPF-AMR-07", plant: "Springfield", ip: "10.30.8.77", status: "Online", reconnects: 8, disconnects: 2, offline: "0m", worstDrop: "Outbound lane", rssi: -64, ap: "AP-SPF-O09", ssid: "AMR-Fleet", channel: "11", band: "2.4 GHz" },
-    { id: "hkv-amr-03", name: "HKV-AMR-03", plant: "Hopkinsville", ip: "10.40.9.23", status: "Offline", reconnects: 22, disconnects: 11, offline: "42m", worstDrop: "Charge station west", rssi: -83, ap: "AP-HKV-C02", ssid: "AMR-Fleet", channel: "157", band: "5 GHz" }
-  ],
-  wifiPoints: [
-    { plant: "Shelbyville", amr: "SHV-AMR-01", x: 18, y: 38, rssi: -58, quality: "Good", ap: "AP-SHV-A12", ssid: "AMR-Fleet", channel: "44", band: "5 GHz", reconnect: false, disconnect: false, offline: false, roaming: false, time: "2026-06-26T08:02" },
-    { plant: "Shelbyville", amr: "SHV-AMR-02", x: 86, y: 58, rssi: -84, quality: "Critical", ap: "AP-SHV-D03", ssid: "AMR-Fleet", channel: "149", band: "5 GHz", reconnect: true, disconnect: true, offline: true, roaming: true, time: "2026-06-26T08:18" },
-    { plant: "Springfield", amr: "SPF-AMR-07", x: 71, y: 56, rssi: -64, quality: "Weak", ap: "AP-SPF-O09", ssid: "AMR-Fleet", channel: "11", band: "2.4 GHz", reconnect: true, disconnect: false, offline: false, roaming: true, time: "2026-06-26T10:17" },
-    { plant: "Hopkinsville", amr: "HKV-AMR-03", x: 23, y: 78, rssi: -83, quality: "Critical", ap: "AP-HKV-C02", ssid: "AMR-Fleet", channel: "157", band: "5 GHz", reconnect: true, disconnect: true, offline: true, roaming: false, time: "2026-06-26T09:33" }
-  ],
-  logs: [
-    { time: "2026-06-26T08:12", plant: "Shelbyville", amr: "SHV-AMR-02", server: "shv-fleet-ubuntu01", host: "pve-shv-01", vm: "214", source: "Roboshop Core", category: "AMR", severity: "High", topic: "Robot offline / disconnect", message: "TCP reconnect storm followed by robot disconnected at Dock door 3." },
-    { time: "2026-06-26T09:33", plant: "Hopkinsville", amr: "HKV-AMR-03", server: "hkv-fleet-ubuntu01", host: "pve-hkv-02", vm: "311", source: "Ubuntu", category: "Server", severity: "High", topic: "Swap full", message: "Swap usage reached 96 percent before Fleet Manager timeout warnings." },
-    { time: "2026-06-26T10:02", plant: "Springfield", amr: "SPF-AMR-07", server: "spf-fleet-ubuntu01", host: "pve-spf-01", vm: "120", source: "RDS", category: "RDS", severity: "Low", topic: "RDS map update", message: "Map package applied; no MD5 mismatch found." }
-  ],
-  badZones: [
-    { plant: "Shelbyville", zone: "Dock door 3", disconnects: 14, reconnects: 36, offline: 6, weak: 29, roaming: 18, score: 95 },
-    { plant: "Hopkinsville", zone: "Charge station west", disconnects: 20, reconnects: 44, offline: 10, weak: 34, roaming: 12, score: 92 },
-    { plant: "Springfield", zone: "Outbound lane", disconnects: 8, reconnects: 16, offline: 2, weak: 20, roaming: 9, score: 64 }
-  ],
+  amrs: [],
+  wifiPoints: [],
+  logs: [],
+  badZones: [],
   discovery: [
     { point: "AMR live position", status: "Not Run", source: "Go RDS proxy", command: "GET /api/plants/{plant}/rds/core", gap: "Needs configured plant URL" },
     { point: "AMR map X/Y coordinates", status: "Not Run", source: "RDS core", command: "rbk_report.x / rbk_report.y", gap: "Scene geometry alignment still needed" },
     { point: "Wi-Fi RSSI", status: "Not Run", source: "AMR Linux Wi-Fi command", command: "iw dev wlan0 link", gap: "Requires AMR SSH or controller telemetry" },
     { point: "RDS map and model data", status: "Not Run", source: "RDS core", command: "model_md5, scene_md5", gap: "Available after import or live pull" }
   ],
-  rdsImportNote: "No RDS core JSON imported yet.",
+  rdsImportNote: "No RDS core JSON imported yet. Use Pull Selected RDS to load live plant data.",
   uploadedMap: ""
 };
 
@@ -130,7 +113,7 @@ function App() {
   const [apiForm, setApiForm] = useState<APIConnection>({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
   const [busy, setBusy] = useState("");
 
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [state]);
+  useEffect(() => { LEGACY_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key)); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [state]);
   useEffect(() => { void loadConnections(); }, []);
   async function loadConnections() {
     const response = await fetch("/api/connections");
@@ -147,9 +130,10 @@ function App() {
   function mergeImport(normalized: NormalizedRds) {
     setState((current) => ({
       ...current,
-      amrs: current.amrs.filter((item) => !(item.imported && item.source === normalized.summary.source)).concat(normalized.amrs),
-      wifiPoints: current.wifiPoints.filter((item) => !(item.imported && item.source === normalized.summary.source)).concat(normalized.points),
-      logs: current.logs.filter((item) => !(item.imported && item.source === normalized.summary.source)).concat(normalized.logs),
+      amrs: current.amrs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.amrs),
+      wifiPoints: current.wifiPoints.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.points),
+      logs: current.logs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.logs),
+      badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant),
       rdsImportNote: `Imported ${normalized.summary.robots} ${normalized.summary.plant} AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`,
       discovery: current.discovery.map((item) => item.point.includes("AMR ") || item.point.includes("RDS ") ? { ...item, status: "Available", source: "Go RDS proxy", gap: `Updated from ${normalized.summary.plant} core feed` } : item)
     }));
@@ -199,4 +183,3 @@ function App() {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
-
