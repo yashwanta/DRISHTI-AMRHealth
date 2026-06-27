@@ -12,6 +12,7 @@ COPY backend ./backend
 RUN go build -o /out/drishti-amr-health ./backend
 
 FROM docker.io/library/alpine:3.21
+RUN apk add --no-cache openssh-client
 LABEL org.opencontainers.image.title="DRISHTI - AMR Health"
 LABEL org.opencontainers.image.description="Local Go and React AMR health dashboard with RDS proxy"
 WORKDIR /app

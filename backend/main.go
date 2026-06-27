@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +11,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,6 +27,26 @@ type APIConnection struct {
 	ScenePath string `json:"scenePath"`
 }
 
+type WifiSource struct {
+	Plant     string `json:"plant"`
+	Name      string `json:"name"`
+	Method    string `json:"method"`
+	Host      string `json:"host"`
+	Username  string `json:"username"`
+	SecretRef string `json:"secretRef"`
+	Command   string `json:"command"`
+	SavedAt   string `json:"savedAt"`
+}
+
+type WifiTestResult struct {
+	OK      bool   `json:"ok"`
+	Method  string `json:"method"`
+	Host    string `json:"host"`
+	Message string `json:"message"`
+	Output  string `json:"output,omitempty"`
+	RSSI    *int   `json:"rssi,omitempty"`
+	Quality string `json:"quality,omitempty"`
+}
 type Server struct {
 	configPath string
 	staticDir  string
@@ -40,6 +64,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", server.handleHealth)
 	mux.HandleFunc("/api/connections", server.handleConnections)
+	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
 	mux.HandleFunc("/", server.handleStatic)
 
@@ -105,6 +130,20 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleWifiTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+		return
+	}
+	var source WifiSource
+	if err := json.NewDecoder(r.Body).Decode(&source); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, status := s.testWifiSource(source)
+	writeJSON(w, status, result)
+}
 func (s *Server) handlePlantProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -167,6 +206,103 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
 }
 
+func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
+	source.Method = strings.TrimSpace(source.Method)
+	source.Host = strings.TrimSpace(source.Host)
+	source.Username = strings.TrimSpace(source.Username)
+	source.SecretRef = strings.TrimSpace(source.SecretRef)
+	source.Command = strings.TrimSpace(source.Command)
+	result := WifiTestResult{Method: source.Method, Host: source.Host}
+	if source.Method != "AMR SSH" {
+		result.Message = "Only AMR SSH can be tested right now. Controller API and manual import need a parser endpoint first."
+		return result, http.StatusBadRequest
+	}
+	if source.Host == "" || source.Username == "" {
+		result.Message = "Host/API and username are required for SSH RSSI testing."
+		return result, http.StatusBadRequest
+	}
+	if source.Command == "" {
+		source.Command = "iw dev wlan0 link"
+	}
+	if looksLikePublicKey(source.SecretRef) {
+		result.Message = "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."
+		return result, http.StatusBadRequest
+	}
+
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=8",
+		"-o", "StrictHostKeyChecking=accept-new",
+	}
+	if source.SecretRef != "" && source.SecretRef != "CyberArk or SSH key reference" {
+		args = append(args, "-i", source.SecretRef)
+	}
+	args = append(args, fmt.Sprintf("%s@%s", source.Username, source.Host), source.Command)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ssh", args...).CombinedOutput()
+	cleanOutput := strings.TrimSpace(string(output))
+	if len(cleanOutput) > 2000 {
+		cleanOutput = cleanOutput[:2000]
+	}
+	result.Output = cleanOutput
+	if ctx.Err() == context.DeadlineExceeded {
+		result.Message = "SSH RSSI test timed out after 12 seconds."
+		return result, http.StatusGatewayTimeout
+	}
+	if err != nil {
+		result.Message = fmt.Sprintf("SSH RSSI test failed: %v", err)
+		return result, http.StatusBadGateway
+	}
+	rssi := parseRSSI(cleanOutput)
+	if rssi == nil {
+		result.OK = true
+		result.Message = "SSH command succeeded, but no RSSI value was found in the output."
+		result.Quality = "Unknown"
+		return result, http.StatusOK
+	}
+	result.OK = true
+	result.RSSI = rssi
+	result.Quality = rssiQuality(*rssi)
+	result.Message = fmt.Sprintf("SSH RSSI test succeeded. Signal %d dBm (%s).", *rssi, result.Quality)
+	return result, http.StatusOK
+}
+
+func looksLikePublicKey(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "ssh-rsa ") || strings.HasPrefix(value, "ssh-ed25519 ") || strings.Contains(value, "BEGIN PUBLIC KEY")
+}
+
+func parseRSSI(output string) *int {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)signal:\s*(-?\d+)\s*dBm`),
+		regexp.MustCompile(`(?i)rssi[^-\d]*(-?\d+)`),
+	}
+	for _, pattern := range patterns {
+		match := pattern.FindStringSubmatch(output)
+		if len(match) == 2 {
+			value, err := strconv.Atoi(match[1])
+			if err == nil {
+				return &value
+			}
+		}
+	}
+	return nil
+}
+
+func rssiQuality(rssi int) string {
+	switch {
+	case rssi >= -60:
+		return "Good"
+	case rssi >= -70:
+		return "Weak"
+	case rssi >= -80:
+		return "Poor"
+	default:
+		return "Critical"
+	}
+}
 func (s *Server) loadConnections() ([]APIConnection, error) {
 	data, err := os.ReadFile(s.configPath)
 	if errors.Is(err, os.ErrNotExist) {

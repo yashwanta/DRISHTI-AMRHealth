@@ -273,6 +273,21 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .report-card strong { display: block; margin-top: 10px; color: white; font-size: clamp(20px, 2vw, 28px); line-height: 1.1; overflow-wrap: anywhere; }
 .report-card small { display: block; margin-top: 10px; color: var(--muted-strong); line-height: 1.35; }
 .source-list { grid-template-columns: 1fr; }
+.wifi-test-result {
+  margin-top: 12px;
+  border: 1px solid var(--line-soft);
+  background: rgba(15, 23, 42, 0.86);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.wifi-test-result.ok { border-color: rgba(34, 197, 94, 0.38); }
+.wifi-test-result.error { border-color: rgba(250, 204, 21, 0.42); }
+.wifi-test-result header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wifi-test-result strong { color: white; }
+.wifi-test-result span { color: var(--muted-strong); }
+.wifi-test-result pre { max-height: 160px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #0a0f1d; color: var(--muted-strong); white-space: pre-wrap; word-break: break-word; }
 .zone-card small + small { margin-top: 4px; color: var(--muted-strong); }
 @media (max-width: 1180px) {
   .metric-grid, .discovery-summary, .api-list, .report-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
