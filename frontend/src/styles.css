@@ -203,6 +203,12 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-heat-zone.critical circle { fill: rgba(239, 68, 68, 0.24); stroke: rgba(239, 68, 68, 0.62); }
 .map-heat-zone circle { stroke-width: 0.12; }
 .map-overlay-note { position: absolute; left: 18px; bottom: 48px; max-width: min(560px, calc(100% - 36px)); padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.38); background: rgba(15, 23, 42, 0.9); color: #e5eefc; font-size: 13px; line-height: 1.4; }
+.map-hover-card { position: absolute; z-index: 6; width: 276px; padding: 12px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.38); background: rgba(15, 23, 42, 0.96); color: #e5eefc; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.34); pointer-events: none; }
+.map-hover-card header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.map-hover-card header strong { color: white; font-size: 14px; }
+.map-hover-card div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid rgba(148, 163, 184, 0.16); }
+.map-hover-card span { color: #9fb6d8; font-size: 11px; }
+.map-hover-card div strong { min-width: 0; color: white; font-size: 12px; overflow-wrap: anywhere; }
 .map-robot.good circle { fill: var(--green); }
 .map-robot.weak circle { fill: var(--yellow); }
 .map-robot.poor circle { fill: var(--orange); }

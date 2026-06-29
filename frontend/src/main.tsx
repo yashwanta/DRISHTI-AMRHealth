@@ -201,6 +201,7 @@ function normalizeSceneResponse(payload: any, plant: string): SceneMap {
   return { plant, area: area?.name || "RDS Area", md5: payload?.data?.md5 || scene?.md5 || "unknown", bounds: { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }, paths, points, bins };
 }
 function SceneMapView({ scene, points, amrs, signalFilter, showMapLabels, focusMode, onSelectAmr }: { scene?: SceneMap; points: WifiPoint[]; amrs: AMR[]; signalFilter: string; showMapLabels: boolean; focusMode: boolean; onSelectAmr?: (name: string) => void }) {
+  const [hoveredMapPoint, setHoveredMapPoint] = useState<{ point: WifiPoint; left: number; top: number } | null>(null);
   if (!scene) return <div className="map-shell map-empty"><strong>No RDS map loaded</strong><span>Pull a plant map to show the real RDS layout here.</span></div>;
   const y = (value: number) => -value;
   const pathD = (path: MapPath) => path.control1 && path.control2
@@ -218,23 +219,33 @@ function SceneMapView({ scene, points, amrs, signalFilter, showMapLabels, focusM
   const minX = focusBounds ? focusBounds.minX : scene.bounds.minX - pad, maxX = focusBounds ? focusBounds.maxX : scene.bounds.maxX + pad, minY = focusBounds ? focusBounds.minY : scene.bounds.minY - pad, maxY = focusBounds ? focusBounds.maxY : scene.bounds.maxY + pad;
   const width = Math.max(1, maxX - minX), height = Math.max(1, maxY - minY);
   const labelPoints = showMapLabels ? scene.points : scene.points.filter((point) => point.name.startsWith("AP") || point.name.startsWith("PP"));
-  const pointTitle = (point: WifiPoint) => {
+  const pointMeta = (point: WifiPoint) => {
     const amr = amrByName.get(point.amr);
     const delay = amr?.networkDelay !== undefined ? `${amr.networkDelay} ms` : "not reported";
     const ssid = ssidLabel(point.ssid || amr?.ssid);
     const ip = amr?.ip || "unknown";
     const hasLiveRssi = point.source === "AMR SSH Auto-Discovery" || amr?.source === "AMR SSH Auto-Discovery";
     const signal = hasLiveRssi ? `${point.rssi} dBm` : `${point.rssi} dBm estimated from RDS connection`;
-    return `${point.amr}\nAMR IP: ${ip}\nQuality: ${point.quality}\nConnected WiFi SSID: ${ssid}\ndBm strength: ${signal}\nConnection: ${amr?.status || "unknown"}\nNetwork delay: ${delay}\nLocation: ${amr?.worstDrop || "unknown"}\nReason: ${amr ? connectivityReason(amr) : "RDS point marker"}`;
+    return { amr, delay, ssid, ip, signal, status: amr?.status || "unknown", location: amr?.worstDrop || "unknown", reason: amr ? connectivityReason(amr) : "RDS point marker" };
   };
+  const pointTitle = (point: WifiPoint) => {
+    const meta = pointMeta(point);
+    return `${point.amr}\nAMR IP: ${meta.ip}\nQuality: ${point.quality}\nConnected WiFi SSID: ${meta.ssid}\ndBm strength: ${meta.signal}\nConnection: ${meta.status}\nNetwork delay: ${meta.delay}\nLocation: ${meta.location}\nReason: ${meta.reason}`;
+  };
+  const showTooltip = (point: WifiPoint, event: React.MouseEvent<SVGGElement>) => {
+    const box = event.currentTarget.closest(".map-shell")?.getBoundingClientRect();
+    if (!box) return;
+    setHoveredMapPoint({ point, left: Math.max(12, Math.min(event.clientX - box.left + 14, box.width - 292)), top: Math.max(12, Math.min(event.clientY - box.top + 14, box.height - 188)) });
+  };
+  const tooltipMeta = hoveredMapPoint ? pointMeta(hoveredMapPoint.point) : null;
   return <div className="map-shell scene-map"><svg className="scene-map-svg" viewBox={`${minX} ${-maxY} ${width} ${height}`} role="img" aria-label={`${scene.plant} RDS map`}>
     <rect x={minX} y={-maxY} width={width} height={height} className="map-bg" />
     <g>{scene.bins.map((bin) => <polygon key={bin.name} points={bin.points.map((point) => `${point.x},${y(point.y)}`).join(" ")} className="map-bin"><title>{bin.name}</title></polygon>)}</g>
     <g>{scene.paths.map((path) => <path key={path.name} d={pathD(path)} className={`map-path ${path.className.toLowerCase()}`}><title>{path.name}</title></path>)}</g>
     <g>{labelPoints.map((point) => <g key={point.name} className={`map-node ${point.name.startsWith("PP") ? "pickup" : point.name.startsWith("AP") ? "action" : "landmark"}`}><circle cx={point.x} cy={y(point.y)} r="0.28" />{showMapLabels && <text x={point.x + 0.34} y={y(point.y) - 0.26}>{point.name}</text>}</g>)}</g>
     <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}-zone`} className={`map-heat-zone ${point.quality.toLowerCase()}`}><circle cx={point.rdsX} cy={y(point.rdsY || 0)} r={focusMode ? "5.4" : "3.8"} /><circle cx={point.rdsX} cy={y(point.rdsY || 0)} r={focusMode ? "2.7" : "1.9"} /></g>)}</g>
-    <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}`} className={`map-robot ${point.quality.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onSelectAmr?.(point.amr)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectAmr?.(point.amr); }}> <circle cx={point.rdsX} cy={y(point.rdsY || 0)} r={focusMode ? "1.25" : "0.86"} /><text x={(point.rdsX || 0) + (focusMode ? 1.45 : 0.98)} y={y(point.rdsY || 0) - (focusMode ? 0.9 : 0.6)}>{point.amr}</text><title>{pointTitle(point)}</title></g>)}</g>
-  </svg>{robotPoints.length === 0 && <div className="map-overlay-note">No {signalFilter} markers for {scene.plant}. RDS currently provides AMR position/status; true Wi-Fi RSSI overlay needs Wi-Fi telemetry.</div>}<div className="map-caption">{scene.plant} - {scene.area} - {scene.paths.length} paths - {scene.points.length} points - {focusMode ? "AMR focus" : "full map"} - map MD5 {scene.md5}</div></div>;
+    <g>{robotPoints.map((point) => <g key={`${point.plant}-${point.amr}`} className={`map-robot ${point.quality.toLowerCase()}`} role="button" tabIndex={0} onMouseEnter={(event) => showTooltip(point, event)} onMouseMove={(event) => showTooltip(point, event)} onMouseLeave={() => setHoveredMapPoint(null)} onClick={() => onSelectAmr?.(point.amr)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectAmr?.(point.amr); }}> <circle cx={point.rdsX} cy={y(point.rdsY || 0)} r={focusMode ? "1.25" : "0.86"} /><text x={(point.rdsX || 0) + (focusMode ? 1.45 : 0.98)} y={y(point.rdsY || 0) - (focusMode ? 0.9 : 0.6)}>{point.amr}</text><title>{pointTitle(point)}</title></g>)}</g>
+  </svg>{hoveredMapPoint && tooltipMeta && <div className="map-hover-card" style={{ left: hoveredMapPoint.left, top: hoveredMapPoint.top }}><header><strong>{hoveredMapPoint.point.amr}</strong>{badge(hoveredMapPoint.point.quality)}</header><div><span>AMR IP</span><strong>{tooltipMeta.ip}</strong></div><div><span>Connected WiFi SSID</span><strong>{tooltipMeta.ssid}</strong></div><div><span>dBm strength</span><strong>{tooltipMeta.signal}</strong></div><div><span>Connection</span><strong>{tooltipMeta.status}</strong></div></div>}{robotPoints.length === 0 && <div className="map-overlay-note">No {signalFilter} markers for {scene.plant}. RDS currently provides AMR position/status; true Wi-Fi RSSI overlay needs Wi-Fi telemetry.</div>}<div className="map-caption">{scene.plant} - {scene.area} - {scene.paths.length} paths - {scene.points.length} points - {focusMode ? "AMR focus" : "full map"} - map MD5 {scene.md5}</div></div>;
 }
 function App() {
   const [state, setState] = useState<AppState>(loadState);
