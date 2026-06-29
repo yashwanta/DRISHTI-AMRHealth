@@ -58,6 +58,7 @@ type WifiDiscoverResult struct {
 	Message string `json:"message"`
 	Output  string `json:"output,omitempty"`
 	RSSI    *int   `json:"rssi,omitempty"`
+	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
 }
 
@@ -73,6 +74,7 @@ type WifiTestResult struct {
 	Message string `json:"message"`
 	Output  string `json:"output,omitempty"`
 	RSSI    *int   `json:"rssi,omitempty"`
+	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
 }
 type Server struct {
@@ -304,8 +306,13 @@ func (s *Server) discoverRobotRSSI(source WifiSource, robot WifiRobot) WifiDisco
 		}
 		last.OK = true
 		last.RSSI = rssi
+		last.SSID = parseSSID(cleanOutput)
 		last.Quality = rssiQuality(*rssi)
-		last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s).", *rssi, last.Quality)
+		if last.SSID != "" {
+			last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s) on SSID %s.", *rssi, last.Quality, last.SSID)
+		} else {
+			last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s).", *rssi, last.Quality)
+		}
 		return last
 	}
 	return last
@@ -428,8 +435,13 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	}
 	result.OK = true
 	result.RSSI = rssi
+	result.SSID = parseSSID(cleanOutput)
 	result.Quality = rssiQuality(*rssi)
-	result.Message = fmt.Sprintf("SSH RSSI test succeeded. Signal %d dBm (%s).", *rssi, result.Quality)
+	if result.SSID != "" {
+		result.Message = fmt.Sprintf("SSH RSSI test succeeded. Signal %d dBm (%s) on SSID %s.", *rssi, result.Quality, result.SSID)
+	} else {
+		result.Message = fmt.Sprintf("SSH RSSI test succeeded. Signal %d dBm (%s).", *rssi, result.Quality)
+	}
 	return result, http.StatusOK
 }
 
@@ -438,6 +450,28 @@ func looksLikePublicKey(value string) bool {
 	return strings.HasPrefix(value, "ssh-rsa ") || strings.HasPrefix(value, "ssh-ed25519 ") || strings.Contains(value, "BEGIN PUBLIC KEY")
 }
 
+func parseSSID(output string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?im)^\s*SSID:\s*(.+?)\s*$`),
+		regexp.MustCompile(`(?im)^\s*ssid\s*[=:]\s*(.+?)\s*$`),
+	}
+	for _, pattern := range patterns {
+		match := pattern.FindStringSubmatch(output)
+		if len(match) == 2 {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "yes:") || strings.HasPrefix(line, "*:") {
+			parts := strings.Split(line, ":")
+			if len(parts) >= 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
 func parseRSSI(output string) *int {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)signal:\s*(-?\d+)\s*dBm`),
