@@ -252,19 +252,22 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
 }
 
+func wifiDiscoverError(message string) WifiDiscoverResponse {
+	return WifiDiscoverResponse{Message: message, Results: []WifiDiscoverResult{}}
+}
 func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResponse, int) {
 	source := normalizeWifiSource(request.Source)
 	if source.Method != "AMR SSH" {
-		return WifiDiscoverResponse{Message: "Only AMR SSH auto-discovery is supported right now."}, http.StatusBadRequest
+		return wifiDiscoverError("Only AMR SSH auto-discovery is supported right now."), http.StatusBadRequest
 	}
 	if source.Username == "" {
-		return WifiDiscoverResponse{Message: "Username is required for AMR RSSI auto-discovery."}, http.StatusBadRequest
+		return wifiDiscoverError("Username is required for AMR RSSI auto-discovery."), http.StatusBadRequest
 	}
 	if looksLikePublicKey(source.SecretRef) {
-		return WifiDiscoverResponse{Message: "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."}, http.StatusBadRequest
+		return wifiDiscoverError("Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."), http.StatusBadRequest
 	}
 	if len(request.Robots) == 0 {
-		return WifiDiscoverResponse{Message: "No AMR robot IPs were provided. Pull RDS core first so DRISHTI can read basic_info.ip."}, http.StatusBadRequest
+		return wifiDiscoverError("No AMR robot IPs were provided. Pull RDS core first so DRISHTI can read basic_info.ip."), http.StatusBadRequest
 	}
 
 	results := make([]WifiDiscoverResult, 0, len(request.Robots))
@@ -458,7 +461,9 @@ func parseSSID(output string) string {
 	for _, pattern := range patterns {
 		match := pattern.FindStringSubmatch(output)
 		if len(match) == 2 {
-			return strings.TrimSpace(match[1])
+			if ssid := cleanSSID(match[1]); ssid != "" {
+				return ssid
+			}
 		}
 	}
 	for _, line := range strings.Split(output, "\n") {
@@ -466,11 +471,28 @@ func parseSSID(output string) string {
 		if strings.HasPrefix(line, "yes:") || strings.HasPrefix(line, "*:") {
 			parts := strings.Split(line, ":")
 			if len(parts) >= 2 {
-				return strings.TrimSpace(parts[1])
+				if ssid := cleanSSID(parts[1]); ssid != "" {
+					return ssid
+				}
 			}
 		}
 	}
 	return ""
+}
+
+func cleanSSID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	invalid := []string{"not found", "not reported", "not captured", "not connected", "no such", "command not found", "error"}
+	for _, token := range invalid {
+		if strings.Contains(lower, token) {
+			return ""
+		}
+	}
+	return value
 }
 func parseRSSI(output string) *int {
 	patterns := []*regexp.Regexp{
