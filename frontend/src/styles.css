@@ -119,7 +119,7 @@ p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
 .search-field { min-width: 280px; }
 .wide-field { grid-column: span 2; }
 
-.primary-action, .ghost-action, .file-action {
+.primary-action, .ghost-action, .danger-action, .file-action {
   min-height: 40px;
   border-radius: 8px;
   border: 1px solid rgba(56, 189, 248, 0.3);
@@ -133,6 +133,7 @@ p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
   white-space: nowrap;
 }
 .ghost-action, .file-action { background: rgba(56, 189, 248, 0.08); color: var(--muted-strong); }
+.danger-action { background: rgba(239, 68, 68, 0.16); border-color: rgba(239, 68, 68, 0.48); color: #fecaca; }
 .file-action input { display: none; }
 
 .table-wrap { overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
