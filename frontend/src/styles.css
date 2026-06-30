@@ -196,7 +196,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-node.pickup circle { fill: #dbeafe; stroke: #2563eb; }
 .map-node.action circle { fill: #dcfce7; stroke: #16a34a; }
 .map-node text { font-size: 0.72px; fill: #334155; paint-order: stroke; stroke: #ffffff; stroke-width: 0.16px; stroke-linejoin: round; }
-.map-robot circle { stroke: #111827; stroke-width: 0.18; filter: drop-shadow(0 0.16px 0.24px rgba(15, 23, 42, 0.48)); }
+.map-robot circle { stroke: #111827; stroke-width: 0.14; filter: drop-shadow(0 0.12px 0.2px rgba(15, 23, 42, 0.44)); }
 .map-heat-zone.good circle { fill: rgba(34, 197, 94, 0.2); stroke: rgba(34, 197, 94, 0.52); }
 .map-heat-zone.weak circle { fill: rgba(250, 204, 21, 0.22); stroke: rgba(250, 204, 21, 0.56); }
 .map-heat-zone.poor circle { fill: rgba(251, 146, 60, 0.23); stroke: rgba(251, 146, 60, 0.58); }
@@ -213,8 +213,8 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-robot.weak circle { fill: var(--yellow); }
 .map-robot.poor circle { fill: var(--orange); }
 .map-robot.critical circle { fill: var(--red); }
-.map-robot text { font-size: 1.42px; font-weight: 900; fill: #0f172a; paint-order: stroke; stroke: #ffffff; stroke-width: 0.42px; stroke-linejoin: round; }
-.map-robot .confidence-label { font-size: 0.92px; font-weight: 800; fill: #334155; stroke-width: 0.32px; }
+.map-robot text { font-size: 0.92px; font-weight: 900; fill: #0f172a; paint-order: stroke; stroke: #ffffff; stroke-width: 0.26px; stroke-linejoin: round; pointer-events: none; }
+.map-robot .confidence-label { font-size: 0.58px; font-weight: 800; fill: #334155; stroke-width: 0.18px; }
 .map-caption { padding: 8px 12px; background: rgba(15, 23, 42, 0.9); color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
 .map-empty { display: grid; place-items: center; align-content: center; gap: 6px; text-align: center; color: var(--muted); background: #0f172a; }
 .map-empty strong { color: white; }
