@@ -214,6 +214,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-robot.poor circle { fill: var(--orange); }
 .map-robot.critical circle { fill: var(--red); }
 .map-robot text { font-size: 1.42px; font-weight: 900; fill: #0f172a; paint-order: stroke; stroke: #ffffff; stroke-width: 0.42px; stroke-linejoin: round; }
+.map-robot .confidence-label { font-size: 0.92px; font-weight: 800; fill: #334155; stroke-width: 0.32px; }
 .map-caption { padding: 8px 12px; background: rgba(15, 23, 42, 0.9); color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
 .map-empty { display: grid; place-items: center; align-content: center; gap: 6px; text-align: center; color: var(--muted); background: #0f172a; }
 .map-empty strong { color: white; }
@@ -322,3 +323,4 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
   .map-shell { min-height: 300px; }
   .timeline-item { grid-template-columns: 1fr; }
 }
+
