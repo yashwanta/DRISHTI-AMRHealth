@@ -185,7 +185,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .heatmap-panel { overflow: hidden; }
 .heatmap-actions, .heatmap-controls, .import-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .heatmap-controls { margin-bottom: 14px; }
-.map-shell { position: relative; width: 100%; aspect-ratio: 12 / 7; min-height: 360px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #0f172a; }
+.map-shell { position: relative; width: 100%; height: clamp(560px, 72vh, 880px); min-height: 560px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #0f172a; }
 .scene-map { display: grid; grid-template-rows: 1fr auto; background: #f8fafc; }
 .scene-map-svg { width: 100%; height: 100%; min-height: 0; display: block; background: #f8fafc; }
 .map-bg { fill: #f8fafc; }
@@ -330,7 +330,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
   .metric-grid, .filter-grid, .form-grid, .threshold-grid, .command-form, .detail-grid, .discovery-summary, .api-list, .report-grid { grid-template-columns: 1fr; }
   .wide-field { grid-column: auto; }
   .search-field, .compact { min-width: 0; width: 100%; }
-  .map-shell { min-height: 300px; }
+  .map-shell { height: clamp(420px, 70vh, 620px); min-height: 420px; }
   .timeline-item { grid-template-columns: 1fr; }
 }
 
