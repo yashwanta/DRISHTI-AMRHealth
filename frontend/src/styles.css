@@ -213,7 +213,6 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-confidence-lines .confidence-medium { stroke: rgba(250, 204, 21, 0.92); }
 .map-confidence-lines .confidence-low { stroke: rgba(239, 68, 68, 0.96); }
 .map-confidence-samples circle { display: none; }
-.map-overlay-note { position: absolute; left: 18px; bottom: 48px; max-width: min(560px, calc(100% - 36px)); padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.38); background: rgba(15, 23, 42, 0.9); color: #e5eefc; font-size: 13px; line-height: 1.4; }
 .map-hover-card { position: absolute; z-index: 6; width: 276px; padding: 12px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.38); background: rgba(15, 23, 42, 0.96); color: #e5eefc; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.34); pointer-events: none; }
 .map-hover-card header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .map-hover-card header strong { color: white; font-size: 14px; }
@@ -226,7 +225,8 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .map-robot.critical circle { fill: var(--red); }
 .map-robot text { font-size: 0.92px; font-weight: 900; fill: #0f172a; paint-order: stroke; stroke: #ffffff; stroke-width: 0.26px; stroke-linejoin: round; pointer-events: none; }
 .map-robot .confidence-label { font-size: 0.58px; font-weight: 800; fill: #334155; stroke-width: 0.18px; }
-.map-caption { padding: 8px 12px; background: rgba(15, 23, 42, 0.9); color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
+.map-caption { padding: 8px 12px; background: rgba(15, 23, 42, 0.9); color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.map-caption-warning { color: #e5eefc; font-weight: 700; }
 .map-empty { display: grid; place-items: center; align-content: center; gap: 6px; text-align: center; color: var(--muted); background: #0f172a; }
 .map-empty strong { color: white; }
 .heatmap-overlay { position: absolute; inset: 0; }
