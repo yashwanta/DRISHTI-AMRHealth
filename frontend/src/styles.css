@@ -314,6 +314,14 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .report-card span { display: block; color: var(--muted); font-size: 13px; }
 .report-card strong { display: block; margin-top: 10px; color: white; font-size: clamp(20px, 2vw, 28px); line-height: 1.1; overflow-wrap: anywhere; }
 .report-card small { display: block; margin-top: 10px; color: var(--muted-strong); line-height: 1.35; }
+.scan-list { display: grid; gap: 12px; }
+.scan-card { border: 1px solid var(--line-soft); background: rgba(15, 23, 42, 0.78); border-radius: 8px; padding: 14px; display: grid; gap: 10px; }
+.scan-card header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.scan-card header strong { display: block; color: white; font-size: 18px; }
+.scan-card header span, .scan-card.empty span { display: block; color: var(--muted); margin-top: 4px; }
+.scan-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+.scan-meta span { min-height: 26px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; color: var(--muted-strong); background: rgba(56, 189, 248, 0.06); font-size: 12px; }
+.scan-amrs { color: var(--muted-strong); line-height: 1.35; }
 .source-list { grid-template-columns: 1fr; }
 .wifi-test-result {
   margin-top: 12px;
