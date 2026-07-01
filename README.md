@@ -2,6 +2,22 @@
 
 Local Go + React dashboard for AMR health, RDS core imports, API connection management, log investigation, discovery, Wi-Fi heat maps, and plant configuration.
 
+## One-Command Install
+
+Windows 11:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-DRISHTI-Windows.ps1
+```
+
+Linux:
+
+```bash
+chmod +x ./install-drishti-linux.sh ./scripts/install-linux.sh
+./install-drishti-linux.sh
+```
+
+The installer verifies/installs Podman, builds the container image, creates local ignored data folders, starts `AMR-Health`, and verifies `http://localhost:8088/api/health`.
 ## Architecture
 
 ```text

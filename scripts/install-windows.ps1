@@ -5,9 +5,9 @@
 .DESCRIPTION
   - Installs Podman Desktop via winget when Podman is missing.
   - Starts/initializes the Podman machine when needed.
-  - Creates local ignored config data/config/api-connections.json from the sanitized example if missing.
-  - Builds the Go + React container image.
-  - Runs the app at http://localhost:8088.
+  - Creates local ignored config/data folders from sanitized examples when missing.
+  - Builds the Go + React container image. Node.js and Go are downloaded inside the container build; they are not required on the host.
+  - Runs the app at http://localhost:8088 by default.
 
 .NOTES
   Run from the package/repository root in PowerShell.
@@ -32,6 +32,11 @@ function Invoke-Step($Message, [scriptblock]$Action) {
   & $Action
 }
 
+Invoke-Step "Checking host dependencies" {
+  Write-Host "Required host dependency: Podman."
+  Write-Host "Container build dependencies are handled inside Containerfile: Node.js, npm, Go, Alpine, OpenSSH client."
+}
+
 Invoke-Step "Checking Podman" {
   if (-not (Test-Command podman)) {
     if ($SkipPodmanInstall) {
@@ -42,26 +47,30 @@ Invoke-Step "Checking Podman" {
     }
     Write-Host "Installing Podman Desktop with winget..."
     winget install --id RedHat.Podman-Desktop -e --accept-package-agreements --accept-source-agreements
-    Write-Host "Podman Desktop installed. Open a new PowerShell window if podman is not yet on PATH, then rerun this script."
+    Write-Host "Podman Desktop install finished. Open a new PowerShell window if podman is not yet on PATH, then rerun this script."
     if (-not (Test-Command podman)) { exit 0 }
   }
   podman --version
 }
 
 Invoke-Step "Starting Podman machine" {
-  $machineList = podman machine list --format json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+  $machineJson = podman machine list --format json 2>$null
+  $machineList = if ($machineJson) { $machineJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { @() }
   if (-not $machineList -or $machineList.Count -eq 0) {
     podman machine init
   }
-  $running = podman machine list --format json 2>$null | ConvertFrom-Json | Where-Object { $_.Running -eq $true }
+  $machineJson = podman machine list --format json 2>$null
+  $running = $machineJson | ConvertFrom-Json | Where-Object { $_.Running -eq $true }
   if (-not $running) {
     podman machine start
   }
+  podman info | Out-Null
 }
 
 Invoke-Step "Preparing local data config" {
   New-Item -ItemType Directory -Force -Path "data\config" | Out-Null
   New-Item -ItemType Directory -Force -Path "data\rds-snapshots" | Out-Null
+  New-Item -ItemType Directory -Force -Path "data\keys" | Out-Null
   if (-not (Test-Path -LiteralPath "data\config\api-connections.json")) {
     Copy-Item -LiteralPath "data\config\api-connections.example.json" -Destination "data\config\api-connections.json"
     Write-Host "Created data\config\api-connections.json from example. Add real plant URLs in the app Admin page."

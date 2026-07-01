@@ -43,6 +43,8 @@ $paths = @(
   "Containerfile",
   "README.md",
   "INSTALL.md",
+  "Install-DRISHTI-Windows.ps1",
+  "install-drishti-linux.sh",
   "go.mod",
   "podman-compose.yml",
   "backend",

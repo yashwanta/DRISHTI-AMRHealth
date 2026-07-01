@@ -19,18 +19,18 @@ install_podman() {
     return
   fi
 
-  log "Installing Podman"
+  log "Installing Podman and runtime dependencies"
   if has_cmd apt-get; then
     run_sudo apt-get update
-    run_sudo apt-get install -y podman
+    run_sudo apt-get install -y podman curl ca-certificates fuse-overlayfs slirp4netns uidmap
   elif has_cmd dnf; then
-    run_sudo dnf install -y podman
+    run_sudo dnf install -y podman curl ca-certificates fuse-overlayfs slirp4netns shadow-utils
   elif has_cmd yum; then
-    run_sudo yum install -y podman
+    run_sudo yum install -y podman curl ca-certificates fuse-overlayfs slirp4netns shadow-utils
   elif has_cmd zypper; then
-    run_sudo zypper --non-interactive install podman
+    run_sudo zypper --non-interactive install podman curl ca-certificates fuse-overlayfs slirp4netns shadow
   elif has_cmd apk; then
-    run_sudo apk add --no-cache podman
+    run_sudo apk add --no-cache podman curl ca-certificates fuse-overlayfs slirp4netns shadow
   else
     echo "Podman is not installed and this script does not know this package manager." >&2
     echo "Install Podman manually, then rerun this script." >&2
@@ -39,11 +39,24 @@ install_podman() {
   podman --version
 }
 
+volume_suffix() {
+  if has_cmd getenforce; then
+    local mode
+    mode="$(getenforce 2>/dev/null || true)"
+    if [ "$mode" = "Enforcing" ] || [ "$mode" = "Permissive" ]; then
+      printf ':Z'
+    fi
+  fi
+}
+
 log "Checking Podman"
 install_podman
 
+log "Checking container runtime"
+podman info >/dev/null
+
 log "Preparing local data config"
-mkdir -p data/config data/rds-snapshots
+mkdir -p data/config data/rds-snapshots data/keys
 if [ ! -f data/config/api-connections.json ]; then
   cp data/config/api-connections.example.json data/config/api-connections.json
   echo "Created data/config/api-connections.json from example. Add real plant URLs in the app Admin page."
@@ -56,10 +69,11 @@ podman build -t "$IMAGE_NAME" .
 
 log "Replacing running container"
 podman rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+VOLUME_SPEC="${ROOT_DIR}/data:/app/data$(volume_suffix)"
 podman run -d \
   --name "$CONTAINER_NAME" \
   -p "${HOST_PORT}:8090" \
-  -v "${ROOT_DIR}/data:/app/data:Z" \
+  -v "$VOLUME_SPEC" \
   --restart unless-stopped \
   "$IMAGE_NAME"
 
@@ -67,11 +81,13 @@ log "Verifying app"
 sleep 3
 if has_cmd curl; then
   curl -fsS "http://localhost:${HOST_PORT}/api/health" >/dev/null
-else
+elif has_cmd python3; then
   python3 - <<PY
 import urllib.request
 urllib.request.urlopen('http://localhost:${HOST_PORT}/api/health', timeout=15).read()
 PY
+else
+  echo "Install succeeded, but curl/python3 is unavailable for health verification."
 fi
 
 echo "DRISHTI - AMR Health is running: http://localhost:${HOST_PORT}"
