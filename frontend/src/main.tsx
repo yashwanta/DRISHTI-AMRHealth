@@ -108,7 +108,17 @@ function confidenceForReading(quality: WifiPoint["quality"], options: { hasLiveR
 const CONFIDENCE_RETENTION_MS = 5 * 24 * 60 * 60 * 1000;
 const MAX_CONFIDENCE_SAMPLES_PER_PLANT = 3000;
 function confidenceBand(score: number) { return score >= 75 ? "high" : score <= 50 ? "low" : "medium"; }
-function isCleanMapPath(path: MapPath) { return !/(bi[- ]?direction|bidirection|two[- ]?way|degeneratebezier)/i.test(`${path.name} ${path.className}`); }
+function pathLength(path: MapPath) { return Math.hypot(path.end.x - path.start.x, path.end.y - path.start.y); }
+function isCleanMapPath(path: MapPath) {
+  const signature = `${path.name} ${path.className}`;
+  const dx = Math.abs(path.end.x - path.start.x);
+  const dy = Math.abs(path.end.y - path.start.y);
+  const longDiagonalRoute = pathLength(path) > 8 && dx > 2.5 && dy > 1.2;
+  const duplicateReturnRoute = path.name.includes("-") && path.start.name > path.end.name && pathLength(path) <= 12;
+  return !/(bi[- ]?direction|bidirection|two[- ]?way|degeneratebezier|bezierpath|bidirectional)/i.test(signature)
+    && !longDiagonalRoute
+    && !duplicateReturnRoute;
+}
 function pruneConfidenceSamples(samples: ConfidenceSample[], now = new Date()) {
   const cutoff = now.getTime() - CONFIDENCE_RETENTION_MS;
   const byPlant = new Map<string, ConfidenceSample[]>();
@@ -277,6 +287,9 @@ function normalizeSceneResponse(payload: any, plant: string): SceneMap {
 }
 function SceneMapView({ scene, points, amrs, confidenceSamples, confidenceMode, signalFilter, showMapLabels, showMapPaths, focusMode, zoomLevel, emptyMessage, onSelectAmr }: { scene?: SceneMap; points: WifiPoint[]; amrs: AMR[]; confidenceSamples: ConfidenceSample[]; confidenceMode: "Current" | "5 days" | "Changes"; signalFilter: string; showMapLabels: boolean; showMapPaths: boolean; focusMode: boolean; zoomLevel: number; emptyMessage: string; onSelectAmr?: (name: string) => void }) {
   const [hoveredMapPoint, setHoveredMapPoint] = useState<{ point: WifiPoint; left: number; top: number } | null>(null);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [dragStart, setDragStart] = useState<{ clientX: number; clientY: number; panX: number; panY: number } | null>(null);
+  useEffect(() => { setPanOffset({ x: 0, y: 0 }); setDragStart(null); }, [scene?.md5, focusMode]);
   if (!scene) return <div className="map-shell map-empty"><strong>No RDS map loaded</strong><span>Pull a plant map to show the real RDS layout here.</span></div>;
   const y = (value: number) => -value;
   const pathD = (path: MapPath) => path.control1 && path.control2
@@ -310,7 +323,11 @@ function SceneMapView({ scene, points, amrs, confidenceSamples, confidenceMode, 
   const zoom = Math.max(1, Math.min(6, zoomLevel || 1));
   const zoomWidth = width / zoom, zoomHeight = height / zoom;
   const centerX = (minX + maxX) / 2, centerY = (minY + maxY) / 2;
-  const viewMinX = centerX - zoomWidth / 2, viewMaxY = centerY + zoomHeight / 2;
+  const maxPanX = Math.max(0, (width - zoomWidth) / 2);
+  const maxPanY = Math.max(0, (height - zoomHeight) / 2);
+  const clampPan = (value: number, limit: number) => Math.max(-limit, Math.min(limit, value));
+  const panX = clampPan(panOffset.x, maxPanX), panY = clampPan(panOffset.y, maxPanY);
+  const viewMinX = centerX - zoomWidth / 2 + panX, viewMaxY = centerY + zoomHeight / 2 + panY;
   const labelPoints = showMapLabels ? scene.points : scene.points.filter((point) => point.name.startsWith("AP") || point.name.startsWith("PP"));
   const pointMeta = (point: WifiPoint) => {
     const amr = amrByName.get(point.amr);
@@ -368,7 +385,20 @@ function SceneMapView({ scene, points, amrs, confidenceSamples, confidenceMode, 
     return { key: `${sample.plant}-${sample.amr}-${previous.id}-${sample.id}`, points: `${previous.x},${y(previous.y)} ${sample.x},${y(sample.y)}`, className: `confidence-${confidenceBand(score)}`, title: `${sample.amr} ${score}% confidence path - ${new Date(previous.time).toLocaleString()} to ${new Date(sample.time).toLocaleString()}` };
   }));
   const visibleMapPaths = showMapPaths ? scene.paths.filter(isCleanMapPath) : [];
-  return <div className="map-shell scene-map"><svg className="scene-map-svg" viewBox={`${viewMinX} ${-viewMaxY} ${zoomWidth} ${zoomHeight}`} role="img" aria-label={`${scene.plant} RDS map`}>
+  const startMapDrag = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (zoom <= 1 || (event.target as Element).closest(".map-robot")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart({ clientX: event.clientX, clientY: event.clientY, panX, panY });
+    setHoveredMapPoint(null);
+  };
+  const moveMapDrag = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragStart) return;
+    const dx = ((event.clientX - dragStart.clientX) / Math.max(1, event.currentTarget.clientWidth)) * zoomWidth;
+    const dy = ((event.clientY - dragStart.clientY) / Math.max(1, event.currentTarget.clientHeight)) * zoomHeight;
+    setPanOffset({ x: clampPan(dragStart.panX - dx, maxPanX), y: clampPan(dragStart.panY + dy, maxPanY) });
+  };
+  const endMapDrag = () => setDragStart(null);
+  return <div className="map-shell scene-map"><svg className={`scene-map-svg ${zoom > 1 ? "draggable" : ""} ${dragStart ? "dragging" : ""}`} viewBox={`${viewMinX} ${-viewMaxY} ${zoomWidth} ${zoomHeight}`} role="img" aria-label={`${scene.plant} RDS map`} onPointerDown={startMapDrag} onPointerMove={moveMapDrag} onPointerUp={endMapDrag} onPointerCancel={endMapDrag} onPointerLeave={endMapDrag}>
     <rect x={viewMinX} y={-viewMaxY} width={zoomWidth} height={zoomHeight} className="map-bg" />
     <g>{scene.bins.map((bin) => <polygon key={bin.name} points={bin.points.map((point) => `${point.x},${y(point.y)}`).join(" ")} className="map-bin"><title>{bin.name}</title></polygon>)}</g>
     <g>{visibleMapPaths.map((path) => <path key={path.name} d={pathD(path)} className={`map-path ${path.className.toLowerCase()}`}><title>{path.name}</title></path>)}</g>
