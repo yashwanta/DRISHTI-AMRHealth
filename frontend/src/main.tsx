@@ -109,15 +109,26 @@ const CONFIDENCE_RETENTION_MS = 5 * 24 * 60 * 60 * 1000;
 const MAX_CONFIDENCE_SAMPLES_PER_PLANT = 3000;
 function confidenceBand(score: number) { return score >= 75 ? "high" : score <= 50 ? "low" : "medium"; }
 function pathLength(path: MapPath) { return Math.hypot(path.end.x - path.start.x, path.end.y - path.start.y); }
-function isCleanMapPath(path: MapPath) {
+function isCleanMapPath(path: MapPath, scene?: SceneMap) {
   const signature = `${path.name} ${path.className}`;
   const dx = Math.abs(path.end.x - path.start.x);
   const dy = Math.abs(path.end.y - path.start.y);
-  const longDiagonalRoute = pathLength(path) > 8 && dx > 2.5 && dy > 1.2;
-  const duplicateReturnRoute = path.name.includes("-") && path.start.name > path.end.name && pathLength(path) <= 12;
+  const length = pathLength(path);
+  const longDiagonalRoute = length > 8 && dx > 2.5 && dy > 1.2;
+  const duplicateReturnRoute = path.name.includes("-") && path.start.name > path.end.name && length <= 12;
+  const bothLandmarks = path.start.name.startsWith("LM") && path.end.name.startsWith("LM");
+  const centerX = (path.start.x + path.end.x) / 2;
+  const centerY = (path.start.y + path.end.y) / 2;
+  const sceneWidth = scene ? Math.max(1, scene.bounds.maxX - scene.bounds.minX) : 1;
+  const sceneHeight = scene ? Math.max(1, scene.bounds.maxY - scene.bounds.minY) : 1;
+  const sceneCenterX = scene ? (scene.bounds.minX + scene.bounds.maxX) / 2 : 0;
+  const insideVerticalBand = scene ? centerY > scene.bounds.minY + sceneHeight * 0.22 && centerY < scene.bounds.maxY - sceneHeight * 0.22 : false;
+  const awayFromRightEdge = scene ? centerX < scene.bounds.maxX - sceneWidth * 0.06 : true;
+  const centralConnectorRoute = bothLandmarks && /straightpath/i.test(path.className) && length >= 3 && centerX > sceneCenterX + 2 && insideVerticalBand && awayFromRightEdge;
   return !/(bi[- ]?direction|bidirection|two[- ]?way|degeneratebezier|bezierpath|bidirectional)/i.test(signature)
     && !longDiagonalRoute
-    && !duplicateReturnRoute;
+    && !duplicateReturnRoute
+    && !centralConnectorRoute;
 }
 function pruneConfidenceSamples(samples: ConfidenceSample[], now = new Date()) {
   const cutoff = now.getTime() - CONFIDENCE_RETENTION_MS;
@@ -384,7 +395,7 @@ function SceneMapView({ scene, points, amrs, confidenceSamples, confidenceMode, 
     const score = Math.min(previous.confidence, sample.confidence);
     return { key: `${sample.plant}-${sample.amr}-${previous.id}-${sample.id}`, points: `${previous.x},${y(previous.y)} ${sample.x},${y(sample.y)}`, className: `confidence-${confidenceBand(score)}`, title: `${sample.amr} ${score}% confidence path - ${new Date(previous.time).toLocaleString()} to ${new Date(sample.time).toLocaleString()}` };
   }));
-  const visibleMapPaths = showMapPaths ? scene.paths.filter(isCleanMapPath) : [];
+  const visibleMapPaths = showMapPaths ? scene.paths.filter((path) => isCleanMapPath(path, scene)) : [];
   const startMapDrag = (event: React.PointerEvent<SVGSVGElement>) => {
     if (zoom <= 1 || (event.target as Element).closest(".map-robot")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
