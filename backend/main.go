@@ -55,6 +55,7 @@ type WifiDiscoverRequest struct {
 
 type WifiDiscoverResult struct {
 	OK      bool   `json:"ok"`
+	Status  string `json:"status,omitempty"`
 	Plant   string `json:"plant"`
 	AMR     string `json:"amr"`
 	Host    string `json:"host"`
@@ -73,6 +74,7 @@ type WifiDiscoverResponse struct {
 }
 type WifiTestResult struct {
 	OK      bool   `json:"ok"`
+	Status  string `json:"status,omitempty"`
 	Method  string `json:"method"`
 	Host    string `json:"host"`
 	Message string `json:"message"`
@@ -1430,61 +1432,70 @@ func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResp
 }
 
 func (s *Server) discoverRobotRSSI(source WifiSource, robot WifiRobot) WifiDiscoverResult {
-	commands := wifiDiscoveryCommands(source.Command)
-	last := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Message: "No RSSI command succeeded."}
-	for _, command := range commands {
-		source.Host = robot.IP
-		output, err := runSSHCommand(source, command, 10*time.Second)
-		cleanOutput := trimOutput(output)
-		last = WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Command: command, Output: cleanOutput}
-		if err != nil {
-			last.Message = fmt.Sprintf("SSH command failed: %v", err)
-			continue
+	source.Host = robot.IP
+	command := wifiAutoRSSICommand()
+	output, err := runSSHCommand(source, command, 10*time.Second)
+	cleanOutput := sanitizeSSHOutput(trimOutput(output), source.SecretRef)
+	result := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Command: "iw dev [auto] link", Output: cleanOutput}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = "timeout"
+			result.Message = "SSH connection timed out after 10s"
+			return result
 		}
-		rssi := parseRSSI(cleanOutput)
-		if rssi == nil {
-			last.Message = "Command succeeded, but no RSSI value was found."
-			last.Quality = "Unknown"
-			continue
+		if noWifiInterface(cleanOutput) {
+			result.Status = "failed"
+			result.Message = "No WiFi interface found on this AMR"
+			return result
 		}
-		last.OK = true
-		last.RSSI = rssi
-		last.SSID = parseSSID(cleanOutput)
-		last.Quality = rssiQuality(*rssi)
-		if last.SSID != "" {
-			last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s) on SSID %s.", *rssi, last.Quality, last.SSID)
-		} else {
-			last.Message = fmt.Sprintf("RSSI detected: %d dBm (%s).", *rssi, last.Quality)
-		}
-		return last
+		result.Status = "failed"
+		result.Message = fmt.Sprintf("SSH command failed: %v", err)
+		return result
 	}
-	return last
+	rssi := parseRSSI(cleanOutput)
+	if rssi == nil {
+		result.Status = "partial"
+		result.Message = "Command succeeded, but no RSSI value was found."
+		result.Quality = "Unknown"
+		return result
+	}
+	result.OK = true
+	result.Status = "available"
+	result.RSSI = rssi
+	result.SSID = parseSSID(cleanOutput)
+	result.Quality = rssiQuality(*rssi)
+	if result.SSID != "" {
+		result.Message = fmt.Sprintf("RSSI detected: %d dBm (%s) on SSID %s.", *rssi, result.Quality, result.SSID)
+	} else {
+		result.Message = fmt.Sprintf("RSSI detected: %d dBm (%s).", *rssi, result.Quality)
+	}
+	return result
+}
+
+func wifiAutoRSSICommand() string {
+	return `sh -lc 'iw_out=$(iw dev 2>&1); iface=$(printf "%s\n" "$iw_out" | grep Interface | awk '\''{print $2}'\'' | head -n 1); if [ -n "$iface" ]; then iw dev "$iface" link; else iwconfig_out=$(iwconfig 2>&1); signal=$(printf "%s\n" "$iwconfig_out" | grep -i "essid\|signal"); if [ -n "$signal" ]; then printf "%s\n" "$signal"; else printf "%s\n%s\nNo WiFi interface found on this AMR\n" "$iw_out" "$iwconfig_out"; exit 19; fi; fi'`
+}
+
+func noWifiInterface(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "no wifi interface found") || strings.Contains(lower, "no such device") || strings.Contains(lower, "device not found")
+}
+
+func sanitizeSSHOutput(output, secretRef string) string {
+	secretRef = strings.TrimSpace(secretRef)
+	if secretRef == "" || secretRef == "CyberArk or SSH key reference" {
+		return output
+	}
+	output = strings.ReplaceAll(output, secretRef, "[credential path]")
+	if base := filepath.Base(secretRef); base != "." && base != string(filepath.Separator) && base != "" {
+		output = strings.ReplaceAll(output, base, "[credential file]")
+	}
+	return output
 }
 
 func wifiDiscoveryCommands(preferred string) []string {
-	commands := []string{}
-	preferred = strings.TrimSpace(preferred)
-	if preferred != "" && preferred != "iw dev wlan0 link" {
-		commands = append(commands, preferred)
-	}
-	commands = append(commands,
-		"iw dev wlan0 link",
-		`sh -lc "for i in $(iw dev 2>/dev/null | awk '/Interface/ {print $2}'); do iw dev \"$i\" link; done"`,
-		"cat /proc/net/wireless",
-		"nmcli -t -f ACTIVE,SSID,SIGNAL,BARS,CHAN,FREQ dev wifi",
-	)
-	seen := map[string]bool{}
-	uniqueCommands := make([]string, 0, len(commands))
-	for _, command := range commands {
-		if command == "" || seen[command] {
-			continue
-		}
-		seen[command] = true
-		uniqueCommands = append(uniqueCommands, command)
-	}
-	return uniqueCommands
+	return []string{wifiAutoRSSICommand()}
 }
-
 func normalizeWifiSource(source WifiSource) WifiSource {
 	source.Method = strings.TrimSpace(source.Method)
 	source.Host = strings.TrimSpace(source.Host)
@@ -1497,7 +1508,7 @@ func normalizeWifiSource(source WifiSource) WifiSource {
 func runSSHCommand(source WifiSource, command string, timeout time.Duration) (string, error) {
 	args := []string{
 		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=8",
+		"-o", "ConnectTimeout=10",
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
 	if source.SecretRef != "" && source.SecretRef != "CyberArk or SSH key reference" {
@@ -1521,62 +1532,52 @@ func trimOutput(output string) string {
 	return cleanOutput
 }
 func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
-	source.Method = strings.TrimSpace(source.Method)
-	source.Host = strings.TrimSpace(source.Host)
-	source.Username = strings.TrimSpace(source.Username)
-	source.SecretRef = strings.TrimSpace(source.SecretRef)
-	source.Command = strings.TrimSpace(source.Command)
+	source = normalizeWifiSource(source)
 	result := WifiTestResult{Method: source.Method, Host: source.Host}
 	if source.Method != "AMR SSH" {
+		result.Status = "failed"
 		result.Message = "Only AMR SSH can be tested right now. Controller API and manual import need a parser endpoint first."
 		return result, http.StatusBadRequest
 	}
 	if source.Host == "" || source.Username == "" {
+		result.Status = "failed"
 		result.Message = "Host/API and username are required for SSH RSSI testing."
 		return result, http.StatusBadRequest
 	}
-	if source.Command == "" {
-		source.Command = "iw dev wlan0 link"
-	}
 	if looksLikePublicKey(source.SecretRef) {
+		result.Status = "failed"
 		result.Message = "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/<key_file>."
 		return result, http.StatusBadRequest
 	}
 
-	args := []string{
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=8",
-		"-o", "StrictHostKeyChecking=accept-new",
-	}
-	if source.SecretRef != "" && source.SecretRef != "CyberArk or SSH key reference" {
-		args = append(args, "-i", source.SecretRef)
-	}
-	args = append(args, fmt.Sprintf("%s@%s", source.Username, source.Host), source.Command)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ssh", args...).CombinedOutput()
-	cleanOutput := strings.TrimSpace(string(output))
-	if len(cleanOutput) > 2000 {
-		cleanOutput = cleanOutput[:2000]
-	}
+	output, err := runSSHCommand(source, wifiAutoRSSICommand(), 10*time.Second)
+	cleanOutput := sanitizeSSHOutput(trimOutput(output), source.SecretRef)
 	result.Output = cleanOutput
-	if ctx.Err() == context.DeadlineExceeded {
-		result.Message = "SSH RSSI test timed out after 12 seconds."
-		return result, http.StatusGatewayTimeout
-	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = "timeout"
+			result.Message = "SSH connection timed out after 10s"
+			return result, http.StatusGatewayTimeout
+		}
+		if noWifiInterface(cleanOutput) {
+			result.Status = "failed"
+			result.Message = "No WiFi interface found on this AMR"
+			return result, http.StatusBadGateway
+		}
+		result.Status = "failed"
 		result.Message = fmt.Sprintf("SSH RSSI test failed: %v", err)
 		return result, http.StatusBadGateway
 	}
 	rssi := parseRSSI(cleanOutput)
 	if rssi == nil {
 		result.OK = true
+		result.Status = "partial"
 		result.Message = "SSH command succeeded, but no RSSI value was found in the output."
 		result.Quality = "Unknown"
 		return result, http.StatusOK
 	}
 	result.OK = true
+	result.Status = "available"
 	result.RSSI = rssi
 	result.SSID = parseSSID(cleanOutput)
 	result.Quality = rssiQuality(*rssi)
@@ -1587,7 +1588,6 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	}
 	return result, http.StatusOK
 }
-
 func looksLikePublicKey(value string) bool {
 	value = strings.TrimSpace(value)
 	return strings.HasPrefix(value, "ssh-rsa ") || strings.HasPrefix(value, "ssh-ed25519 ") || strings.Contains(value, "BEGIN PUBLIC KEY")
