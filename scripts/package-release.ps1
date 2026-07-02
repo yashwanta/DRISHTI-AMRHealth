@@ -17,7 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\")).Path
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $packageName = "DRISHTI-AMRHealth-$Version"
 $stageRoot = Join-Path $root ".package"
 $stage = Join-Path $stageRoot $packageName
@@ -46,27 +46,28 @@ $paths = @(
   "Install-DRISHTI-Windows.ps1",
   "install-drishti-linux.sh",
   "go.mod",
-  "podman-compose.yml",
+  "deploy",
   "backend",
-  "frontend\index.html",
-  "frontend\package-lock.json",
-  "frontend\package.json",
-  "frontend\tsconfig.json",
-  "frontend\vite.config.ts",
-  "frontend\src",
-  "data\config\api-connections.example.json",
+  "frontend/index.html",
+  "frontend/package-lock.json",
+  "frontend/package.json",
+  "frontend/tsconfig.json",
+  "frontend/vite.config.ts",
+  "frontend/src",
+  "data/config/api-connections.example.json",
   "docs",
-  "scripts"
+  "scripts",
+  "tools"
 )
 
 foreach ($path in $paths) { Copy-Path $path }
 
 # Remove generated/runtime-only content if copied through broad directories.
 $remove = @(
-  "frontend\node_modules",
-  "frontend\dist",
-  "data\config\api-connections.json",
-  "data\rds-snapshots",
+  "frontend/node_modules",
+  "frontend/dist",
+  "data/config/api-connections.json",
+  "data/rds-snapshots",
   ".gocache",
   "rds-discovery"
 )

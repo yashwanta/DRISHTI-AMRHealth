@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate Go, React, and package layout
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate Go backend
+        run: go test ./backend
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Validate release package script
+        shell: pwsh
+        run: ./scripts/package-release.ps1 -Version ci
+
+      - name: Verify package excludes local private data
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath dist -Filter 'DRISHTI-AMRHealth-ci.zip' | Select-Object -First 1
+          if (-not $archive) { throw 'Release package was not created.' }
+          $extractPath = Join-Path $env:RUNNER_TEMP 'drishti-package-check'
+          if (Test-Path -LiteralPath $extractPath) { Remove-Item -LiteralPath $extractPath -Recurse -Force }
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractPath -Force
+          $files = Get-ChildItem -LiteralPath $extractPath -Recurse -File | ForEach-Object { $_.FullName.Replace($extractPath, '') -replace '\\','/' }
+          $forbidden = $files | Where-Object { $_ -match '/data/config/api-connections\.json$|/data/rds-snapshots/|/data/keys/' }
+          if ($forbidden) { throw "Package contains private runtime paths: $($forbidden -join ', ')" }

@@ -41,16 +41,16 @@ GET /api/plants/{plant}/rds/scene?save=1
 The pull script reads the same local ignored config file:
 
 ```powershell
-.\scripts\pull-rds-core.ps1 -Plant Shelbyville
-.\scripts\pull-rds-core.ps1 -Plant Springfield
-.\scripts\pull-rds-core.ps1 -Plant Hopkinsville
-.\scripts\pull-rds-core.ps1 -Plant Shelbyville -IncludeScene
+.\tools\rds\pull-rds-core.ps1 -Plant Shelbyville
+.\tools\rds\pull-rds-core.ps1 -Plant Springfield
+.\tools\rds\pull-rds-core.ps1 -Plant Hopkinsville
+.\tools\rds\pull-rds-core.ps1 -Plant Shelbyville -IncludeScene
 ```
 
 You can also pass a one-off base URL without saving it:
 
 ```powershell
-.\scripts\pull-rds-core.ps1 -Plant TestPlant -BaseUrl "http://rds-host:8080"
+.\tools\rds\pull-rds-core.ps1 -Plant TestPlant -BaseUrl "http://rds-host:8080"
 ```
 
 ## Core Feed Mapping

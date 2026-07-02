@@ -39,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\Install-DRISHTI-Windows.ps1
 Alternative direct script:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+powershell -ExecutionPolicy Bypass -File .\deploy\install\install-windows.ps1
 ```
 
 If Podman is installed for the first time and `podman` is not immediately available, open a new PowerShell window and rerun the command.
@@ -49,15 +49,15 @@ If Podman is installed for the first time and `podman` is not immediately availa
 From the extracted package folder:
 
 ```bash
-chmod +x ./install-drishti-linux.sh ./scripts/install-linux.sh
+chmod +x ./install-drishti-linux.sh ./deploy/install/install-linux.sh
 ./install-drishti-linux.sh
 ```
 
 Alternative direct script:
 
 ```bash
-chmod +x ./scripts/install-linux.sh
-./scripts/install-linux.sh
+chmod +x ./deploy/install/install-linux.sh
+./deploy/install/install-linux.sh
 ```
 
 ## Open the App

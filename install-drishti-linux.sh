@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALLER="${SCRIPT_DIR}/scripts/install-linux.sh"
+INSTALLER="${SCRIPT_DIR}/deploy/install/install-linux.sh"
 
 if [ ! -f "$INSTALLER" ]; then
   echo "Missing installer script: $INSTALLER" >&2

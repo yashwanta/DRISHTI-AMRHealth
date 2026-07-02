@@ -4,7 +4,7 @@ set -euo pipefail
 HOST_PORT="${HOST_PORT:-8088}"
 IMAGE_NAME="${IMAGE_NAME:-drishti-amr-health}"
 CONTAINER_NAME="${CONTAINER_NAME:-AMR-Health}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 log() { printf '\n==> %s\n' "$1"; }

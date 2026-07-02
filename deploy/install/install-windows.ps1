@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\")).Path
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\")).Path
 Set-Location $root
 
 function Test-Command($Name) {

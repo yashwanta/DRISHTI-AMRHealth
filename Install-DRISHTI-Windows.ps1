@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$installer = Join-Path $PSScriptRoot "scripts\install-windows.ps1"
+$installer = Join-Path $PSScriptRoot "deploy\install\install-windows.ps1"
 if (-not (Test-Path -LiteralPath $installer)) {
   throw "Missing installer script: $installer"
 }
