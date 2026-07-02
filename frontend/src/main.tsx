@@ -1109,11 +1109,11 @@ function App() {
     setWifiTest(null);
     setWifiDiscover(null);
     if (!source.username) {
-      setWifiDiscover({ ok: false, message: "Username is required for AMR RSSI auto-discovery. Enter robowatch, save, then test again.", results: [] });
+      setWifiDiscover({ ok: false, message: "Username is required for AMR RSSI auto-discovery. Enter the approved read-only AMR SSH username, save, then test again.", results: [] });
       return;
     }
     if (isPlaceholderCredential(source.secretRef)) {
-      setWifiDiscover({ ok: false, message: "Credential Reference must be the private key path inside DRISHTI, for example /app/data/keys/robowatch_id.", results: [] });
+      setWifiDiscover({ ok: false, message: "Credential Reference must be the private key path inside DRISHTI, for example /app/data/keys/<key_file>.", results: [] });
       return;
     }
     setBusy("Testing AMR RSSI");

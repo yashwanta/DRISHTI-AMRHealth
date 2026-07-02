@@ -1,15 +1,46 @@
+# OS / editor noise
 .DS_Store
 Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# Logs
 *.log
+logs/
+
+# Environment and local secrets
 .env
 .env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+
+# Node / frontend build output
 node_modules/
+frontend/node_modules/
 dist/
-.package/
+frontend/dist/
 build/
+
+# Go and tool caches
 .gocache/
+.cache/
+
+# Local packaging output
+.package/
+*.zip
+*.tar
+*.tar.gz
+
+# Local RDS data and private runtime config
 rds-discovery/
 data/rds-snapshots/
+data/reports/
 data/config/*
 !data/config/
 !data/config/api-connections.example.json

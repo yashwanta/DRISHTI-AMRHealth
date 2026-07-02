@@ -1089,7 +1089,7 @@ func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResp
 		return wifiDiscoverError("Username is required for AMR RSSI auto-discovery."), http.StatusBadRequest
 	}
 	if looksLikePublicKey(source.SecretRef) {
-		return wifiDiscoverError("Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."), http.StatusBadRequest
+		return wifiDiscoverError("Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/<key_file>."), http.StatusBadRequest
 	}
 	if len(request.Robots) == 0 {
 		return wifiDiscoverError("No AMR robot IPs were provided. Pull RDS core first so DRISHTI can read basic_info.ip."), http.StatusBadRequest
@@ -1224,7 +1224,7 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 		source.Command = "iw dev wlan0 link"
 	}
 	if looksLikePublicKey(source.SecretRef) {
-		result.Message = "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/robowatch_id."
+		result.Message = "Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/<key_file>."
 		return result, http.StatusBadRequest
 	}
 
