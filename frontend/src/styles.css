@@ -117,6 +117,56 @@ p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14); }
 .compact { min-width: 180px; }
 .search-field { min-width: 280px; }
+.report-search-field { position: relative; }
+.search-box { position: relative; }
+.search-box input { width: 100%; padding-right: 42px; }
+.search-clear {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.92);
+  color: var(--muted-strong);
+  font-weight: 900;
+}
+.suggestion-list {
+  position: absolute;
+  z-index: 35;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+  box-shadow: var(--shadow);
+}
+.suggestion-list button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-strong);
+  text-align: left;
+  padding: 0 9px;
+}
+.suggestion-list button:hover, .suggestion-list button:focus-visible {
+  background: rgba(56, 189, 248, 0.12);
+  color: white;
+  outline: none;
+}
+.search-hit {
+  border-radius: 4px;
+  background: rgba(250, 204, 21, 0.24);
+  color: #fde68a;
+  padding: 0 2px;
+}
 .wide-field { grid-column: span 2; }
 
 .primary-action, .ghost-action, .danger-action, .file-action {

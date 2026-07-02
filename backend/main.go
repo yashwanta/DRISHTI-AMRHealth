@@ -156,6 +156,7 @@ func main() {
 	mux.HandleFunc("/api/connections", server.handleConnections)
 	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
 	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
+	mux.HandleFunc("/api/reports/search/suggest", server.handleReportSearchSuggest)
 	mux.HandleFunc("/api/reports/events", server.handleReportEvents)
 	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
@@ -339,6 +340,80 @@ func (s *Server) close() {
 	if s.db != nil {
 		_ = s.db.Close()
 	}
+}
+
+func (s *Server) handleReportSearchSuggest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+	connections, _ := s.loadConnections()
+	suggestions, err := reportSearchSuggestions(query, connections)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, suggestions)
+}
+
+func reportSearchSuggestions(query string, connections []APIConnection) ([]string, error) {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return []string{}, nil
+	}
+	seen := map[string]string{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		key := strings.ToLower(value)
+		if value == "" || seen[key] != "" || !strings.Contains(key, needle) {
+			return
+		}
+		seen[key] = value
+	}
+	plantBySlug := map[string]string{}
+	for _, connection := range connections {
+		plantBySlug[slug(connection.Plant)] = connection.Plant
+		add(connection.Plant)
+	}
+	files, err := filepath.Glob(filepath.Join("data", "rds-snapshots", "*-core-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		plant := plantFromSnapshotFile(file, plantBySlug)
+		add(plant)
+		observations, err := observationsFromSnapshot(file, plant, "")
+		if err != nil {
+			log.Printf("report search snapshot skipped %s: %v", file, err)
+			continue
+		}
+		for _, observation := range observations {
+			add(observation.AMR)
+			add(observation.Zone)
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for _, value := range seen {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.HasPrefix(strings.ToLower(result[i]), needle)
+		right := strings.HasPrefix(strings.ToLower(result[j]), needle)
+		if left != right {
+			return left
+		}
+		return result[i] < result[j]
+	})
+	if len(result) > 12 {
+		result = result[:12]
+	}
+	return result, nil
 }
 
 func (s *Server) handleReportEvents(w http.ResponseWriter, r *http.Request) {
