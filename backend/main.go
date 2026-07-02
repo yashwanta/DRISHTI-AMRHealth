@@ -97,6 +97,26 @@ type ZoneAcknowledgement struct {
 	Notes   string `json:"notes"`
 }
 
+type ReportEvent struct {
+	Time     string `json:"time"`
+	Plant    string `json:"plant"`
+	AMR      string `json:"amr"`
+	Zone     string `json:"zone"`
+	Server   string `json:"server"`
+	Host     string `json:"host"`
+	VM       string `json:"vm"`
+	Source   string `json:"source"`
+	Category string `json:"category"`
+	Severity string `json:"severity"`
+	Topic    string `json:"topic"`
+	Message  string `json:"message"`
+}
+
+type ReportEventsResponse struct {
+	Events    []ReportEvent `json:"events"`
+	UpdatedAt string        `json:"updated_at"`
+}
+
 type BadZoneEventsResponse struct {
 	ZoneID          string               `json:"zone_id"`
 	PlantID         string               `json:"plant_id"`
@@ -136,6 +156,7 @@ func main() {
 	mux.HandleFunc("/api/connections", server.handleConnections)
 	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
 	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
+	mux.HandleFunc("/api/reports/events", server.handleReportEvents)
 	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
 	mux.HandleFunc("/", server.handleStatic)
@@ -318,6 +339,161 @@ func (s *Server) close() {
 	if s.db != nil {
 		_ = s.db.Close()
 	}
+}
+
+func (s *Server) handleReportEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+		return
+	}
+	plant := strings.TrimSpace(r.URL.Query().Get("plant"))
+	if strings.EqualFold(plant, "all") {
+		plant = ""
+	}
+	severities := reportSeverityFilter(r.URL.Query().Get("severity"))
+	start, end, err := reportTimeWindow(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	connections, _ := s.loadConnections()
+	events, err := reportEventsFromSnapshots(plant, severities, start, end, connections)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ReportEventsResponse{Events: events, UpdatedAt: time.Now().Format(time.RFC3339)})
+}
+
+func reportSeverityFilter(raw string) map[string]bool {
+	selected := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		value := strings.ToLower(strings.TrimSpace(part))
+		if value == "" {
+			continue
+		}
+		selected[value] = true
+	}
+	if len(selected) == 0 {
+		selected["high"] = true
+		selected["medium"] = true
+		selected["low"] = true
+	}
+	return selected
+}
+
+func reportTimeWindow(values url.Values) (time.Time, time.Time, error) {
+	now := time.Now()
+	rangeValue := strings.ToLower(strings.TrimSpace(values.Get("range")))
+	if rangeValue == "custom" {
+		start, ok := parseReportTime(values.Get("start"))
+		if !ok {
+			return time.Time{}, time.Time{}, errors.New("custom start is required")
+		}
+		end, ok := parseReportTime(values.Get("end"))
+		if !ok {
+			return time.Time{}, time.Time{}, errors.New("custom end is required")
+		}
+		if end.Before(start) {
+			return time.Time{}, time.Time{}, errors.New("custom end must be after start")
+		}
+		return start, end, nil
+	}
+	duration := 24 * time.Hour
+	switch rangeValue {
+	case "1h":
+		duration = time.Hour
+	case "6h":
+		duration = 6 * time.Hour
+	case "24h", "":
+		duration = 24 * time.Hour
+	default:
+		return time.Time{}, time.Time{}, fmt.Errorf("unsupported range %q", rangeValue)
+	}
+	return now.Add(-duration), now, nil
+}
+
+func reportEventsFromSnapshots(plant string, severities map[string]bool, start, end time.Time, connections []APIConnection) ([]ReportEvent, error) {
+	files, err := filepath.Glob(filepath.Join("data", "rds-snapshots", "*-core-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	plantBySlug := map[string]string{}
+	for _, connection := range connections {
+		plantBySlug[slug(connection.Plant)] = connection.Plant
+	}
+	events := []ReportEvent{}
+	for _, file := range files {
+		filePlant := plantFromSnapshotFile(file, plantBySlug)
+		if plant != "" && !strings.EqualFold(filePlant, plant) && slug(filePlant) != slug(plant) {
+			continue
+		}
+		observations, err := observationsFromSnapshot(file, filePlant, "")
+		if err != nil {
+			log.Printf("report event snapshot skipped %s: %v", file, err)
+			continue
+		}
+		for _, observation := range observations {
+			if observation.Timestamp.Before(start) || observation.Timestamp.After(end) {
+				continue
+			}
+			severity, topic := reportEventSeverity(observation)
+			if !severities[strings.ToLower(severity)] {
+				continue
+			}
+			events = append(events, ReportEvent{
+				Time:     observation.RawTime,
+				Plant:    observation.Plant,
+				AMR:      observation.AMR,
+				Zone:     observation.Zone,
+				Server:   "Local RDS snapshot",
+				Host:     observation.Plant + " RDS",
+				Source:   "RDS Core",
+				Category: "AMR",
+				Severity: severity,
+				Topic:    topic,
+				Message:  reportEventMessage(observation, severity),
+			})
+		}
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].Time > events[j].Time })
+	if len(events) > 300 {
+		events = events[:300]
+	}
+	return events, nil
+}
+
+func plantFromSnapshotFile(file string, plantBySlug map[string]string) string {
+	name := filepath.Base(file)
+	parts := strings.Split(name, "-core-")
+	if len(parts) > 1 {
+		if plant, ok := plantBySlug[parts[0]]; ok {
+			return plant
+		}
+		return strings.Title(strings.ReplaceAll(parts[0], "-", " "))
+	}
+	return "Unknown"
+}
+
+func reportEventSeverity(observation zoneObservation) (string, string) {
+	if !observation.Connected {
+		return "High", "Robot offline / disconnect"
+	}
+	if observation.DelayMS >= 150 {
+		return "Medium", "High RDS network delay"
+	}
+	if observation.DelayMS >= 80 {
+		return "Medium", "Elevated RDS network delay"
+	}
+	return "Low", "RDS connectivity sample"
+}
+
+func reportEventMessage(observation zoneObservation, severity string) string {
+	if severity == "High" {
+		return fmt.Sprintf("%s disconnected at %s. Zone %s. RDS delay %d ms.", observation.AMR, observation.RawTime, observation.Zone, observation.DelayMS)
+	}
+	return fmt.Sprintf("%s reported %d ms RDS delay at %s in zone %s.", observation.AMR, observation.DelayMS, observation.RawTime, observation.Zone)
 }
 
 func (s *Server) handleBadZoneReports(w http.ResponseWriter, r *http.Request) {
@@ -553,7 +729,7 @@ func observationsFromSnapshot(file, plantID, zoneName string) ([]zoneObservation
 		rbk := mapValue(report["rbk_report"])
 		order := mapValue(report["current_order"])
 		zone := currentZone(rbk, order)
-		if normalizeZone(zone) != normalizeZone(zoneName) {
+		if strings.TrimSpace(zoneName) != "" && normalizeZone(zone) != normalizeZone(zoneName) {
 			continue
 		}
 		name := firstString(report["uuid"], report["vehicle_id"], nestedValue(order, "vehicle"), "Unknown AMR")
@@ -587,7 +763,7 @@ func parseReportTime(value string) (time.Time, bool) {
 	if value == "" {
 		return time.Time{}, false
 	}
-	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", time.RFC1123, time.RFC1123Z}
+	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02T15:04", time.RFC1123, time.RFC1123Z}
 	for _, layout := range layouts {
 		if parsed, err := time.Parse(layout, value); err == nil {
 			return parsed, true
