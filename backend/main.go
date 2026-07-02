@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,6 +131,18 @@ type ZoneAckRequest struct {
 	PlantID string `json:"plant_id"`
 }
 
+type BadZoneExportRow struct {
+	ZoneID         string
+	Plant          string
+	AMR            string
+	Score          int
+	TopIssue       string
+	RDSDelayMS     int
+	Acknowledged   bool
+	AcknowledgedBy string
+	AcknowledgedAt string
+}
+
 type Server struct {
 	configPath string
 	staticDir  string
@@ -158,6 +171,7 @@ func main() {
 	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
 	mux.HandleFunc("/api/reports/search/suggest", server.handleReportSearchSuggest)
 	mux.HandleFunc("/api/reports/events", server.handleReportEvents)
+	mux.HandleFunc("/api/reports/bad-zones/export", server.handleBadZonesExport)
 	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
 	mux.HandleFunc("/", server.handleStatic)
@@ -569,6 +583,145 @@ func reportEventMessage(observation zoneObservation, severity string) string {
 		return fmt.Sprintf("%s disconnected at %s. Zone %s. RDS delay %d ms.", observation.AMR, observation.RawTime, observation.Zone, observation.DelayMS)
 	}
 	return fmt.Sprintf("%s reported %d ms RDS delay at %s in zone %s.", observation.AMR, observation.DelayMS, observation.RawTime, observation.Zone)
+}
+
+func (s *Server) handleBadZonesExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+		return
+	}
+	format := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("format")))
+	if format != "" && format != "csv" {
+		writeError(w, http.StatusBadRequest, errors.New("only format=csv is supported"))
+		return
+	}
+	plant := strings.TrimSpace(r.URL.Query().Get("plant"))
+	connections, _ := s.loadConnections()
+	rows, err := s.badZoneExportRows(plant, connections)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write([]string{"Zone ID", "Plant", "AMR", "Score", "Top Issue", "RDS Delay (ms)", "Acknowledged (Y/N)", "Acknowledged By", "Acknowledged At"}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, row := range rows {
+		acknowledged := "N"
+		if row.Acknowledged {
+			acknowledged = "Y"
+		}
+		if err := writer.Write([]string{row.ZoneID, row.Plant, row.AMR, strconv.Itoa(row.Score), row.TopIssue, strconv.Itoa(row.RDSDelayMS), acknowledged, row.AcknowledgedBy, row.AcknowledgedAt}); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename=DRISHTI_BadZones.csv")
+	w.Header().Set("Content-Type", "text/csv")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buffer.Bytes())
+}
+
+func (s *Server) badZoneExportRows(plant string, connections []APIConnection) ([]BadZoneExportRow, error) {
+	plant = strings.TrimSpace(plant)
+	plantFilterActive := plant != "" && !strings.EqualFold(plant, "All")
+	plantBySlug := map[string]string{}
+	for _, connection := range connections {
+		plantBySlug[slug(connection.Plant)] = connection.Plant
+	}
+	files, err := filepath.Glob(filepath.Join("data", "rds-snapshots", "*-core-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	type exportBucket struct {
+		row BadZoneExportRow
+	}
+	buckets := map[string]*exportBucket{}
+	for _, file := range files {
+		plantID := plantFromSnapshotFile(file, plantBySlug)
+		if plantFilterActive && !strings.EqualFold(plantID, plant) {
+			continue
+		}
+		observations, err := observationsFromSnapshot(file, plantID, "")
+		if err != nil {
+			log.Printf("bad-zone export snapshot skipped %s: %v", file, err)
+			continue
+		}
+		for _, observation := range observations {
+			if !observation.IsIncident {
+				continue
+			}
+			zoneID := observation.Plant + "|" + observation.Zone
+			key := zoneID + "|" + observation.AMR
+			bucket := buckets[key]
+			if bucket == nil {
+				bucket = &exportBucket{row: BadZoneExportRow{ZoneID: zoneID, Plant: observation.Plant, AMR: observation.AMR, TopIssue: "RDS connectivity sample"}}
+				buckets[key] = bucket
+			}
+			issue, score := badZoneExportIssue(observation)
+			if score > bucket.row.Score {
+				bucket.row.Score = score
+				bucket.row.TopIssue = issue
+			}
+			if observation.DelayMS > bucket.row.RDSDelayMS {
+				bucket.row.RDSDelayMS = observation.DelayMS
+			}
+		}
+	}
+	rows := make([]BadZoneExportRow, 0, len(buckets))
+	ackCache := map[string]*ZoneAcknowledgement{}
+	for _, bucket := range buckets {
+		row := bucket.row
+		ack, ok := ackCache[row.ZoneID]
+		if !ok {
+			var err error
+			ack, err = s.latestZoneAcknowledgement(row.ZoneID)
+			if err != nil {
+				return nil, err
+			}
+			ackCache[row.ZoneID] = ack
+		}
+		if ack != nil {
+			row.Acknowledged = true
+			row.AcknowledgedBy = ack.AckBy
+			row.AcknowledgedAt = ack.AckAt
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Score != rows[j].Score {
+			return rows[i].Score > rows[j].Score
+		}
+		if rows[i].Plant != rows[j].Plant {
+			return rows[i].Plant < rows[j].Plant
+		}
+		if rows[i].ZoneID != rows[j].ZoneID {
+			return rows[i].ZoneID < rows[j].ZoneID
+		}
+		return rows[i].AMR < rows[j].AMR
+	})
+	return rows, nil
+}
+
+func badZoneExportIssue(observation zoneObservation) (string, int) {
+	if !observation.Connected {
+		return "Robot disconnected", 20
+	}
+	if observation.DelayMS >= 150 {
+		return "High RDS network delay", 14
+	}
+	if observation.DelayMS >= 80 {
+		return "Elevated RDS network delay", 8
+	}
+	return "RDS connectivity sample", 1
 }
 
 func (s *Server) handleBadZoneReports(w http.ResponseWriter, r *http.Request) {
