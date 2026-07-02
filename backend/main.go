@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	_ "github.com/lib/pq"
 )
 
 type APIConnection struct {
@@ -77,10 +80,42 @@ type WifiTestResult struct {
 	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
 }
+type ZoneEvent struct {
+	Timestamp     string `json:"timestamp"`
+	AMR           string `json:"amr"`
+	RDSDelayMS    int    `json:"rds_delay_ms"`
+	DurationMS    int    `json:"duration_ms"`
+	ReconnectedAt string `json:"reconnected_at"`
+}
+
+type ZoneAcknowledgement struct {
+	ID      int64  `json:"id"`
+	ZoneID  string `json:"zone_id"`
+	PlantID string `json:"plant_id"`
+	AckBy   string `json:"ack_by"`
+	AckAt   string `json:"ack_at"`
+	Notes   string `json:"notes"`
+}
+
+type BadZoneEventsResponse struct {
+	ZoneID          string               `json:"zone_id"`
+	PlantID         string               `json:"plant_id"`
+	Events          []ZoneEvent          `json:"events"`
+	Acknowledgement *ZoneAcknowledgement `json:"acknowledgement,omitempty"`
+}
+
+type ZoneAckRequest struct {
+	AckBy   string `json:"ack_by"`
+	Notes   string `json:"notes"`
+	PlantID string `json:"plant_id"`
+}
+
 type Server struct {
 	configPath string
 	staticDir  string
 	client     *http.Client
+	db         *sql.DB
+	ackPath    string
 }
 
 func main() {
@@ -89,13 +124,19 @@ func main() {
 		configPath: env("DRISHTI_API_CONFIG", filepath.Join("data", "config", "api-connections.json")),
 		staticDir:  env("DRISHTI_STATIC_DIR", filepath.Join("frontend", "dist")),
 		client:     &http.Client{Timeout: 20 * time.Second},
+		ackPath:    env("DRISHTI_ZONE_ACK_FILE", filepath.Join("data", "reports", "zone-acknowledgements.json")),
 	}
+	if err := server.initReportStore(); err != nil {
+		log.Printf("report store warning: %v", err)
+	}
+	defer server.close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", server.handleHealth)
 	mux.HandleFunc("/api/connections", server.handleConnections)
 	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
 	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
+	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
 	mux.HandleFunc("/", server.handleStatic)
 
@@ -243,6 +284,386 @@ func (s *Server) handlePlantProxy(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+func (s *Server) initReportStore() error {
+	databaseURL := strings.TrimSpace(os.Getenv("DRISHTI_DATABASE_URL"))
+	if databaseURL == "" {
+		return nil
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS zone_acknowledgements (
+		id SERIAL PRIMARY KEY,
+		zone_id TEXT NOT NULL,
+		plant_id TEXT NOT NULL,
+		ack_by TEXT NOT NULL,
+		ack_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		notes TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		_ = db.Close()
+		return err
+	}
+	s.db = db
+	return nil
+}
+
+func (s *Server) close() {
+	if s.db != nil {
+		_ = s.db.Close()
+	}
+}
+
+func (s *Server) handleBadZoneReports(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/reports/bad-zones/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 {
+		writeError(w, http.StatusNotFound, errors.New("unknown bad-zone report route"))
+		return
+	}
+	zoneID, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(zoneID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("invalid zone id"))
+		return
+	}
+	plantID, zoneName := splitZoneID(zoneID)
+	switch parts[1] {
+	case "events":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+			return
+		}
+		events, err := badZoneEventsFromSnapshots(plantID, zoneName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		ack, err := s.latestZoneAcknowledgement(zoneID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, BadZoneEventsResponse{ZoneID: zoneID, PlantID: plantID, Events: events, Acknowledgement: ack})
+	case "acknowledge":
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+			return
+		}
+		var request ZoneAckRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		request.AckBy = strings.TrimSpace(request.AckBy)
+		if request.AckBy == "" {
+			writeError(w, http.StatusBadRequest, errors.New("ack_by is required"))
+			return
+		}
+		if request.PlantID == "" {
+			request.PlantID = plantID
+		}
+		ack, err := s.saveZoneAcknowledgement(zoneID, request)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ack)
+	default:
+		writeError(w, http.StatusNotFound, errors.New("unknown bad-zone report route"))
+	}
+}
+
+func splitZoneID(zoneID string) (string, string) {
+	parts := strings.SplitN(zoneID, "|", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return "", strings.TrimSpace(zoneID)
+}
+
+func (s *Server) latestZoneAcknowledgement(zoneID string) (*ZoneAcknowledgement, error) {
+	if s.db != nil {
+		row := s.db.QueryRow(`SELECT id, zone_id, plant_id, ack_by, ack_at, notes FROM zone_acknowledgements WHERE zone_id = $1 ORDER BY ack_at DESC, id DESC LIMIT 1`, zoneID)
+		var ack ZoneAcknowledgement
+		var ackAt time.Time
+		if err := row.Scan(&ack.ID, &ack.ZoneID, &ack.PlantID, &ack.AckBy, &ackAt, &ack.Notes); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		ack.AckAt = ackAt.Format(time.RFC3339)
+		return &ack, nil
+	}
+	acks, err := s.loadLocalAcknowledgements()
+	if err != nil {
+		return nil, err
+	}
+	var latest *ZoneAcknowledgement
+	for i := range acks {
+		ack := acks[i]
+		if ack.ZoneID != zoneID {
+			continue
+		}
+		if latest == nil || ack.AckAt > latest.AckAt || (ack.AckAt == latest.AckAt && ack.ID > latest.ID) {
+			latest = &ack
+		}
+	}
+	return latest, nil
+}
+
+func (s *Server) saveZoneAcknowledgement(zoneID string, request ZoneAckRequest) (ZoneAcknowledgement, error) {
+	ackAt := time.Now().UTC()
+	if s.db != nil {
+		row := s.db.QueryRow(`INSERT INTO zone_acknowledgements(zone_id, plant_id, ack_by, ack_at, notes) VALUES($1, $2, $3, $4, $5) RETURNING id`, zoneID, request.PlantID, request.AckBy, ackAt, request.Notes)
+		var id int64
+		if err := row.Scan(&id); err != nil {
+			return ZoneAcknowledgement{}, err
+		}
+		return ZoneAcknowledgement{ID: id, ZoneID: zoneID, PlantID: request.PlantID, AckBy: request.AckBy, AckAt: ackAt.Format(time.RFC3339), Notes: request.Notes}, nil
+	}
+	acks, err := s.loadLocalAcknowledgements()
+	if err != nil {
+		return ZoneAcknowledgement{}, err
+	}
+	var nextID int64 = 1
+	for _, ack := range acks {
+		if ack.ID >= nextID {
+			nextID = ack.ID + 1
+		}
+	}
+	ack := ZoneAcknowledgement{ID: nextID, ZoneID: zoneID, PlantID: request.PlantID, AckBy: request.AckBy, AckAt: ackAt.Format(time.RFC3339), Notes: request.Notes}
+	acks = append(acks, ack)
+	if err := os.MkdirAll(filepath.Dir(s.ackPath), 0o755); err != nil {
+		return ZoneAcknowledgement{}, err
+	}
+	body, err := json.MarshalIndent(acks, "", "  ")
+	if err != nil {
+		return ZoneAcknowledgement{}, err
+	}
+	return ack, os.WriteFile(s.ackPath, body, 0o600)
+}
+
+func (s *Server) loadLocalAcknowledgements() ([]ZoneAcknowledgement, error) {
+	body, err := os.ReadFile(s.ackPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []ZoneAcknowledgement{}, nil
+		}
+		return nil, err
+	}
+	var acks []ZoneAcknowledgement
+	if err := json.Unmarshal(body, &acks); err != nil {
+		return nil, err
+	}
+	return acks, nil
+}
+
+type zoneObservation struct {
+	Zone       string
+	Plant      string
+	AMR        string
+	Timestamp  time.Time
+	RawTime    string
+	DelayMS    int
+	Connected  bool
+	IsIncident bool
+}
+
+func badZoneEventsFromSnapshots(plantID, zoneName string) ([]ZoneEvent, error) {
+	files, err := filepath.Glob(filepath.Join("data", "rds-snapshots", "*-core-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	observations := []zoneObservation{}
+	for _, file := range files {
+		fileObservations, err := observationsFromSnapshot(file, plantID, zoneName)
+		if err != nil {
+			log.Printf("bad-zone snapshot skipped %s: %v", file, err)
+			continue
+		}
+		observations = append(observations, fileObservations...)
+	}
+	sort.Slice(observations, func(i, j int) bool { return observations[i].Timestamp.Before(observations[j].Timestamp) })
+	events := []ZoneEvent{}
+	for i, observation := range observations {
+		if !observation.IsIncident {
+			continue
+		}
+		reconnectedAt := ""
+		for _, later := range observations[i+1:] {
+			if later.AMR == observation.AMR && later.Connected {
+				reconnectedAt = later.RawTime
+				break
+			}
+		}
+		durationMS := 0
+		if reconnectedAt != "" {
+			if reconnectTime, ok := parseReportTime(reconnectedAt); ok {
+				durationMS = int(reconnectTime.Sub(observation.Timestamp).Milliseconds())
+				if durationMS < 0 {
+					durationMS = 0
+				}
+			}
+		}
+		events = append(events, ZoneEvent{Timestamp: observation.RawTime, AMR: observation.AMR, RDSDelayMS: observation.DelayMS, DurationMS: durationMS, ReconnectedAt: reconnectedAt})
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].Timestamp > events[j].Timestamp })
+	if len(events) > 50 {
+		events = events[:50]
+	}
+	return events, nil
+}
+
+func observationsFromSnapshot(file, plantID, zoneName string) ([]zoneObservation, error) {
+	body, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	core := mapValue(payload["data"])
+	if core == nil {
+		return nil, errors.New("missing data object")
+	}
+	reports := sliceValue(core["report"])
+	info, _ := os.Stat(file)
+	rawTime := stringValue(core["create_on"])
+	parsedTime, ok := parseReportTime(rawTime)
+	if !ok && info != nil {
+		parsedTime = info.ModTime()
+		rawTime = parsedTime.Format(time.RFC3339)
+	}
+	observations := []zoneObservation{}
+	for _, rawReport := range reports {
+		report := mapValue(rawReport)
+		if report == nil {
+			continue
+		}
+		rbk := mapValue(report["rbk_report"])
+		order := mapValue(report["current_order"])
+		zone := currentZone(rbk, order)
+		if normalizeZone(zone) != normalizeZone(zoneName) {
+			continue
+		}
+		name := firstString(report["uuid"], report["vehicle_id"], nestedValue(order, "vehicle"), "Unknown AMR")
+		delay := intValue(report["network_delay"])
+		disconnected := intValue(report["connection_status"]) == 0 || boolValue(nestedValue(mapValue(report["undispatchable_reason"]), "disconnect"))
+		incident := disconnected || delay >= 80
+		observations = append(observations, zoneObservation{Zone: zone, Plant: plantID, AMR: name, Timestamp: parsedTime, RawTime: rawTime, DelayMS: delay, Connected: !disconnected, IsIncident: incident})
+	}
+	return observations, nil
+}
+
+func currentZone(rbk, order map[string]any) string {
+	if value := stringValue(nestedValue(rbk, "current_station")); value != "" {
+		return value
+	}
+	blocks := sliceValue(nestedValue(order, "blocks"))
+	if len(blocks) > 0 {
+		if value := stringValue(nestedValue(mapValue(blocks[0]), "location")); value != "" {
+			return value
+		}
+	}
+	return "Unknown location"
+}
+
+func normalizeZone(value string) string {
+	return strings.ToLower(regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(strings.TrimSpace(value), ""))
+}
+
+func parseReportTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", time.RFC1123, time.RFC1123Z}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func mapValue(value any) map[string]any {
+	mapped, _ := value.(map[string]any)
+	return mapped
+}
+
+func sliceValue(value any) []any {
+	sliced, _ := value.([]any)
+	return sliced
+}
+
+func nestedValue(mapped map[string]any, key string) any {
+	if mapped == nil {
+		return nil
+	}
+	return mapped[key]
+}
+
+func firstString(values ...any) string {
+	for _, value := range values {
+		if text := stringValue(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func intValue(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case json.Number:
+		value, _ := typed.Int64()
+		return int(value)
+	case string:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.staticDir, filepath.Clean(r.URL.Path))
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {

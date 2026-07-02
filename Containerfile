@@ -7,7 +7,7 @@ RUN npm run build
 
 FROM docker.io/library/golang:1.25-alpine AS backend
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY backend ./backend
 RUN go build -o /out/drishti-amr-health ./backend
 

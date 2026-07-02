@@ -163,6 +163,17 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .zone-card small, .rank-card small, .command-card small, .admin-card small { color: var(--muted); display: block; margin-top: 5px; }
 .score-bar { height: 7px; background: #0f172a; border-radius: 999px; overflow: hidden; margin-top: 10px; }
 .score-bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--purple), var(--red)); }
+.zone-card[role="button"] { cursor: pointer; }
+.zone-card.acknowledged { opacity: 0.62; }
+.zone-score { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-strong); font-weight: 800; }
+.score-help { width: 22px; height: 22px; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.1); color: var(--blue); font-weight: 900; line-height: 1; }
+.ack-badge { display: inline-flex; width: fit-content; margin-top: 8px; padding: 4px 9px; border-radius: 999px; border: 1px solid rgba(34, 197, 94, 0.28); background: rgba(34, 197, 94, 0.14); color: #bbf7d0; font-size: 12px; font-weight: 800; }
+.zone-expanded { margin-top: 12px; display: grid; gap: 10px; }
+.compact-table th, .compact-table td { padding: 9px 10px; font-size: 12px; }
+.ack-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.ack-controls input { min-height: 38px; border: 1px solid var(--line); border-radius: 7px; background: #0f172a; color: var(--text); padding: 0 10px; outline: none; }
+.ack-controls input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14); }
+.zone-status { color: var(--muted-strong); }
 
 .detail-panel { scroll-margin-top: 20px; }
 .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
