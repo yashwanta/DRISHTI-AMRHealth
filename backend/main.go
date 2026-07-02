@@ -81,6 +81,24 @@ type WifiTestResult struct {
 	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
 }
+
+type DiscoveryAMR struct {
+	Plant    string `json:"plant"`
+	AMR      string `json:"amr"`
+	RSSIDBM  *int   `json:"rssi_dbm"`
+	SNRDB    *int   `json:"snr_db"`
+	APName   string `json:"ap_name"`
+	Band     string `json:"band"`
+	Channel  string `json:"channel"`
+	LastSeen string `json:"last_seen"`
+	Source   string `json:"source"`
+}
+
+type DiscoveryResponse struct {
+	Items     []DiscoveryAMR `json:"items"`
+	UpdatedAt string         `json:"updated_at"`
+	Message   string         `json:"message"`
+}
 type ZoneEvent struct {
 	Timestamp     string `json:"timestamp"`
 	AMR           string `json:"amr"`
@@ -168,6 +186,7 @@ func main() {
 	mux.HandleFunc("/api/health", server.handleHealth)
 	mux.HandleFunc("/api/connections", server.handleConnections)
 	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
+	mux.HandleFunc("/api/discovery", server.handleDiscovery)
 	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
 	mux.HandleFunc("/api/reports/search/suggest", server.handleReportSearchSuggest)
 	mux.HandleFunc("/api/reports/events", server.handleReportEvents)
@@ -194,6 +213,299 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "drishti-amr-health"})
 }
 
+func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	plant := strings.TrimSpace(r.URL.Query().Get("plant"))
+	items, message, err := s.discoveryAMRs(plant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, DiscoveryResponse{Items: items, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Message: message})
+}
+
+func (s *Server) discoveryAMRs(plant string) ([]DiscoveryAMR, string, error) {
+	connections, _ := s.loadConnections()
+	plantBySlug := map[string]string{}
+	for _, connection := range connections {
+		plantBySlug[slug(connection.Plant)] = connection.Plant
+	}
+	items, err := discoveryFromSnapshots(plant, plantBySlug)
+	if err != nil {
+		return nil, "", err
+	}
+	message := "Loaded Discovery telemetry from local RDS snapshots."
+	missingRSSI := len(items) == 0
+	for _, item := range items {
+		if item.RSSIDBM == nil || *item.RSSIDBM == 0 {
+			missingRSSI = true
+			break
+		}
+	}
+	if missingRSSI {
+		fallback, fallbackMessage := s.discoveryFromRDSFallback(plant)
+		if len(fallback) > 0 {
+			items = mergeDiscoveryItems(items, fallback)
+			message = fallbackMessage
+		} else if fallbackMessage != "" {
+			message = message + " " + fallbackMessage
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Plant != items[j].Plant {
+			return items[i].Plant < items[j].Plant
+		}
+		return items[i].AMR < items[j].AMR
+	})
+	return items, message, nil
+}
+
+func discoveryFromSnapshots(plant string, plantBySlug map[string]string) ([]DiscoveryAMR, error) {
+	files, err := filepath.Glob(filepath.Join("data", "rds-snapshots", "*-core-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	latest := map[string]string{}
+	latestTime := map[string]time.Time{}
+	for _, file := range files {
+		filePlant := plantFromSnapshotFile(file, plantBySlug)
+		if plant != "" && !strings.EqualFold(filePlant, plant) {
+			continue
+		}
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+		if current, ok := latestTime[filePlant]; !ok || info.ModTime().After(current) {
+			latest[filePlant] = file
+			latestTime[filePlant] = info.ModTime()
+		}
+	}
+	items := []DiscoveryAMR{}
+	for filePlant, file := range latest {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := parseDiscoveryPayload(body, filePlant, "Local RDS snapshot")
+		if err != nil {
+			log.Printf("discovery snapshot skipped %s: %v", file, err)
+			continue
+		}
+		items = append(items, parsed...)
+	}
+	return items, nil
+}
+
+func (s *Server) discoveryFromRDSFallback(plant string) ([]DiscoveryAMR, string) {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("DRISHTI_DISCOVERY_RDS_BASE_URL")), "/")
+	sessionToken := strings.TrimSpace(os.Getenv("DRISHTI_DISCOVERY_RDS_SESSION_TOKEN"))
+	if baseURL == "" || sessionToken == "" {
+		return nil, "Set DRISHTI_DISCOVERY_RDS_BASE_URL and DRISHTI_DISCOVERY_RDS_SESSION_TOKEN on the Go service to enable live RDS RSSI fallback."
+	}
+	endpoint := baseURL
+	if !strings.HasSuffix(endpoint, "/api") {
+		endpoint += "/api"
+	}
+	request, err := http.NewRequest(http.MethodGet, endpoint+"/", nil)
+	if err != nil {
+		return nil, fmt.Sprintf("RDS RSSI fallback request could not be created: %v", err)
+	}
+	headerName := strings.TrimSpace(os.Getenv("DRISHTI_DISCOVERY_RDS_SESSION_HEADER"))
+	if headerName == "" {
+		headerName = "Authorization"
+	}
+	headerValue := sessionToken
+	if strings.EqualFold(headerName, "Authorization") && !strings.HasPrefix(strings.ToLower(headerValue), "bearer ") {
+		headerValue = "Bearer " + headerValue
+	}
+	request.Header.Set(headerName, headerValue)
+	response, err := s.client.Do(request)
+	if err != nil {
+		return nil, fmt.Sprintf("RDS RSSI fallback failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Sprintf("RDS RSSI fallback returned %s.", response.Status)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Sprintf("RDS RSSI fallback read failed: %v", err)
+	}
+	fallbackPlant := plant
+	if fallbackPlant == "" {
+		fallbackPlant = "RDS"
+	}
+	items, err := parseDiscoveryPayload(body, fallbackPlant, "Live RDS fallback")
+	if err != nil {
+		return nil, fmt.Sprintf("RDS RSSI fallback parse failed: %v", err)
+	}
+	return items, "Loaded Discovery telemetry with live RDS RSSI fallback from Go environment configuration."
+}
+
+func parseDiscoveryPayload(body []byte, plant, source string) ([]DiscoveryAMR, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	core := mapValue(payload["data"])
+	if core == nil {
+		core = payload
+	}
+	reports := firstSlice(core, "report", "reports", "robots", "data")
+	if len(reports) == 0 {
+		if nested := mapValue(core["data"]); nested != nil {
+			reports = firstSlice(nested, "report", "reports", "robots", "items")
+		}
+	}
+	lastSeen := firstString(core["create_on"], core["last_seen"], core["timestamp"], time.Now().UTC().Format(time.RFC3339))
+	items := []DiscoveryAMR{}
+	for _, rawReport := range reports {
+		report := mapValue(rawReport)
+		if report == nil {
+			continue
+		}
+		basicInfo := mapValue(report["basic_info"])
+		rbk := mapValue(report["rbk_report"])
+		order := mapValue(report["current_order"])
+		amrName := firstString(report["uuid"], report["vehicle_id"], report["name"], nestedValue(order, "vehicle"), nestedValue(basicInfo, "name"), "Unknown AMR")
+		rssi := firstIntPointer(report, basicInfo, rbk, []string{"rssi_dbm", "rssi", "wifi_rssi", "signal_dbm", "signal"})
+		if rssi != nil && *rssi == 0 {
+			rssi = nil
+		}
+		snr := firstIntPointer(report, basicInfo, rbk, []string{"snr_db", "snr", "wifi_snr"})
+		if snr != nil && *snr == 0 {
+			snr = nil
+		}
+		apName := firstString(findValueByKeys(report, "ap_name", "ap", "access_point", "bssid"), findValueByKeys(basicInfo, "ap_name", "ap", "access_point", "bssid"), findValueByKeys(rbk, "ap_name", "ap", "access_point", "bssid"))
+		if apName == "" {
+			apName = firstString(findValueByKeys(report, "ssid", "wifi_ssid"), findValueByKeys(basicInfo, "ssid", "wifi_ssid"), findValueByKeys(rbk, "ssid", "wifi_ssid"))
+		}
+		band := firstString(findValueByKeys(report, "band", "wifi_band"), findValueByKeys(basicInfo, "band", "wifi_band"), findValueByKeys(rbk, "band", "wifi_band"))
+		channel := firstString(findValueByKeys(report, "channel", "chan", "wifi_channel"), findValueByKeys(basicInfo, "channel", "chan", "wifi_channel"), findValueByKeys(rbk, "channel", "chan", "wifi_channel"))
+		itemLastSeen := firstString(findValueByKeys(report, "last_seen", "timestamp", "updated_at"), lastSeen)
+		items = append(items, DiscoveryAMR{Plant: plant, AMR: amrName, RSSIDBM: rssi, SNRDB: snr, APName: apName, Band: band, Channel: channel, LastSeen: itemLastSeen, Source: source})
+	}
+	return items, nil
+}
+
+func mergeDiscoveryItems(primary, fallback []DiscoveryAMR) []DiscoveryAMR {
+	byKey := map[string]DiscoveryAMR{}
+	for _, item := range fallback {
+		byKey[strings.ToLower(item.Plant+"|"+item.AMR)] = item
+	}
+	for _, item := range primary {
+		key := strings.ToLower(item.Plant + "|" + item.AMR)
+		if fallbackItem, ok := byKey[key]; ok {
+			if item.RSSIDBM == nil || *item.RSSIDBM == 0 {
+				item.RSSIDBM = fallbackItem.RSSIDBM
+			}
+			if item.SNRDB == nil || *item.SNRDB == 0 {
+				item.SNRDB = fallbackItem.SNRDB
+			}
+			if item.APName == "" {
+				item.APName = fallbackItem.APName
+			}
+			if item.Band == "" {
+				item.Band = fallbackItem.Band
+			}
+			if item.Channel == "" {
+				item.Channel = fallbackItem.Channel
+			}
+			if item.LastSeen == "" {
+				item.LastSeen = fallbackItem.LastSeen
+			}
+			if fallbackItem.Source != "" && item.RSSIDBM == fallbackItem.RSSIDBM {
+				item.Source = fallbackItem.Source
+			}
+		}
+		byKey[key] = item
+	}
+	result := make([]DiscoveryAMR, 0, len(byKey))
+	for _, item := range byKey {
+		result = append(result, item)
+	}
+	return result
+}
+
+func firstSlice(mapped map[string]any, keys ...string) []any {
+	for _, key := range keys {
+		if values := sliceValue(mapped[key]); len(values) > 0 {
+			return values
+		}
+	}
+	return nil
+}
+
+func firstIntPointer(report map[string]any, basicInfo map[string]any, rbk map[string]any, keys []string) *int {
+	for _, mapped := range []map[string]any{report, basicInfo, rbk} {
+		if value := findValueByKeys(mapped, keys...); value != nil {
+			if parsed, ok := intPointerValue(value); ok {
+				return parsed
+			}
+		}
+	}
+	return nil
+}
+
+func findValueByKeys(value any, keys ...string) any {
+	mapped := mapValue(value)
+	if mapped == nil {
+		return nil
+	}
+	wanted := map[string]bool{}
+	for _, key := range keys {
+		wanted[strings.ToLower(key)] = true
+	}
+	for key, raw := range mapped {
+		if wanted[strings.ToLower(key)] {
+			return raw
+		}
+	}
+	for _, raw := range mapped {
+		if nested := findValueByKeys(raw, keys...); nested != nil {
+			return nested
+		}
+	}
+	return nil
+}
+
+func intPointerValue(value any) (*int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		parsed := int(typed)
+		return &parsed, true
+	case float32:
+		parsed := int(typed)
+		return &parsed, true
+	case int:
+		parsed := typed
+		return &parsed, true
+	case int64:
+		parsed := int(typed)
+		return &parsed, true
+	case json.Number:
+		parsed64, err := typed.Int64()
+		if err != nil {
+			return nil, false
+		}
+		parsed := int(parsed64)
+		return &parsed, true
+	case string:
+		cleaned := strings.TrimSpace(strings.TrimSuffix(strings.ReplaceAll(typed, "dBm", ""), "dB"))
+		parsed, err := strconv.Atoi(cleaned)
+		if err != nil {
+			return nil, false
+		}
+		return &parsed, true
+	default:
+		return nil, false
+	}
+}
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1027,6 +1339,9 @@ func firstString(values ...any) string {
 }
 
 func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
 	switch typed := value.(type) {
 	case string:
 		return strings.TrimSpace(typed)
