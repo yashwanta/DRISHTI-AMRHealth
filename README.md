@@ -29,7 +29,7 @@ The installer verifies/installs Podman, builds the container image, creates loca
 - `tools/rds/` - local RDS snapshot helper scripts
 - `scripts/` - release/package automation
 
-See `docs/project-structure.md` for the full layout.
+See `docs/project-structure.md` for the full layout. See `docs/operational-security-memory.md` for standing Fleet Manager, RDS, AMR, and DRISHTI security guidance.
 
 ## Architecture
 
