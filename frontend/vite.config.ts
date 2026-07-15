@@ -6,8 +6,13 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8090"
-    }
+      "/api": "http://localhost:8090",
+      "/siteops/api": {
+        target: "http://localhost:8080",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/siteops/, ""),
+      },
+    },
   },
   build: {
     outDir: "dist",

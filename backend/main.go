@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -195,6 +196,7 @@ func main() {
 	mux.HandleFunc("/api/reports/bad-zones/export", server.handleBadZonesExport)
 	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
 	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
+	mux.HandleFunc("/siteops/api/", server.handleSiteOpsProxy)
 	mux.HandleFunc("/", server.handleStatic)
 
 	addr := ":" + port
@@ -580,6 +582,29 @@ func (s *Server) handleWifiDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 	response, status := s.discoverWifiRSSI(request)
 	writeJSON(w, status, response)
+}
+func (s *Server) handleSiteOpsProxy(w http.ResponseWriter, r *http.Request) {
+	targetStr := strings.TrimSpace(os.Getenv("SITEOPS_BACKEND_URL"))
+	if targetStr == "" {
+		targetStr = "http://localhost:8080"
+	}
+	target, err := url.Parse(targetStr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("invalid SITEOPS_BACKEND_URL: %w", err))
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/siteops")
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("siteops proxy error for %s: %v", r.URL.Path, err)
+		writeError(w, http.StatusBadGateway, fmt.Errorf("SiteOps backend unreachable: %w", err))
+	}
+	proxy.ServeHTTP(w, r)
 }
 func (s *Server) handlePlantProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
