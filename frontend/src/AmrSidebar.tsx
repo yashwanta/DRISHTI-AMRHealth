@@ -3,13 +3,14 @@ import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, W
 import { clsx } from 'clsx'
 import { useAuth } from './auth'
 
-const siteopsNav = [
-  { to: '/',            label: 'Dashboard',  Icon: LayoutDashboard },
-  { to: '/logs',        label: 'Logs',       Icon: FileText },
-  { to: '/rds-logs',    label: 'RDS Logs',   Icon: Radio },
-  { to: '/agent',       label: 'Agent',      Icon: BrainCircuit },
-  { to: '/agent/fleet', label: 'AMR Fleet',  Icon: Activity },
-  { to: '/amr-logs',    label: 'AMR Logs',   Icon: ScrollText },
+const nav = [
+  { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
+  { to: '/logs',        label: 'Logs',          Icon: FileText },
+  { to: '/rds-logs',    label: 'RDS Logs',      Icon: Radio },
+  { to: '/agent',       label: 'Agent',         Icon: BrainCircuit },
+  { to: '/agent/fleet', label: 'AMR Fleet',     Icon: Activity },
+  { to: '/amr-logs',    label: 'AMR Logs',      Icon: ScrollText },
+  { to: '/amr/',        label: 'WiFi / Maps',   Icon: Wifi },
 ]
 
 const adminNav = [
@@ -31,8 +32,7 @@ export function AmrSidebar() {
         </div>
       </div>
       <nav className="flex-1 px-3 py-4 space-y-1">
-        <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">Operations</div>
-        {siteopsNav.map(({ to, label, Icon }) => (
+        {nav.map(({ to, label, Icon }) => (
           <NavLink
             key={to}
             to={to}
@@ -80,21 +80,6 @@ export function AmrSidebar() {
               Admin Login
             </NavLink>
           )}
-        </div>
-        <div className="pt-4 mt-4 border-t border-gray-800">
-          <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">WiFi / Maps</div>
-          <NavLink
-            to="/amr/"
-            className={({ isActive }) =>
-              clsx(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                isActive ? 'bg-blue-600 text-white' : 'hover:bg-gray-800 hover:text-white'
-              )
-            }
-          >
-            <Wifi size={18} />
-            AMR Health Suite
-          </NavLink>
         </div>
       </nav>
       <div className="px-5 py-4 text-xs text-gray-500 border-t border-gray-700">
