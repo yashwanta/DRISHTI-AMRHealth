@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Signal } from 'lucide-react'
+import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Server, RefreshCw, LogIn, LogOut } from 'lucide-react'
 import { clsx } from 'clsx'
+import { useAuth } from './auth'
 
 const siteopsNav = [
   { to: '/',            label: 'Dashboard',  Icon: LayoutDashboard },
@@ -11,12 +12,13 @@ const siteopsNav = [
   { to: '/amr-logs',    label: 'AMR Logs',   Icon: ScrollText },
 ]
 
-const amrNav = [
-  { to: '/amr/', label: 'WiFi Health',   Icon: Wifi },
-  { to: '/amr/', label: 'Heatmap',       Icon: Signal },
+const adminNav = [
+  { to: '/servers', label: 'Servers',   Icon: Server },
+  { to: '/sync',    label: 'Sync Jobs', Icon: RefreshCw },
 ]
 
 export function AmrSidebar() {
+  const auth = useAuth()
   return (
     <aside className="w-56 flex-shrink-0 bg-gray-900 text-gray-300 flex flex-col">
       <div className="flex items-center gap-2.5 px-5 py-5 border-b border-gray-700">
@@ -32,7 +34,7 @@ export function AmrSidebar() {
         <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">Operations</div>
         {siteopsNav.map(({ to, label, Icon }) => (
           <NavLink
-            key={to + label}
+            key={to}
             to={to}
             end={to === '/' || to === '/agent'}
             className={({ isActive }) =>
@@ -46,6 +48,39 @@ export function AmrSidebar() {
             <span>{label}</span>
           </NavLink>
         ))}
+        <div className="pt-4 mt-4 border-t border-gray-800">
+          <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">Admin</div>
+          {auth.isAuthenticated ? (
+            adminNav.map(({ to, label, Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) =>
+                  clsx(
+                    'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                    isActive ? 'bg-blue-600 text-white' : 'hover:bg-gray-800 hover:text-white'
+                  )
+                }
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+              </NavLink>
+            ))
+          ) : (
+            <NavLink
+              to="/login"
+              className={({ isActive }) =>
+                clsx(
+                  'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                  isActive ? 'bg-cyan-600 text-white' : 'hover:bg-gray-800 hover:text-white'
+                )
+              }
+            >
+              <LogIn size={18} />
+              Admin Login
+            </NavLink>
+          )}
+        </div>
         <div className="pt-4 mt-4 border-t border-gray-800">
           <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">WiFi / Maps</div>
           <NavLink
@@ -63,8 +98,23 @@ export function AmrSidebar() {
         </div>
       </nav>
       <div className="px-5 py-4 text-xs text-gray-500 border-t border-gray-700">
-        <div>Go + React</div>
-        <div className="text-gray-600">Local RDS proxy enabled</div>
+        {auth.isAuthenticated ? (
+          <div className="space-y-2">
+            <div>
+              <div className="text-gray-400">{auth.username}</div>
+              <div className="text-gray-500">{auth.role}</div>
+            </div>
+            <button
+              onClick={() => auth.logout()}
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+            >
+              <LogOut size={14} />
+              Sign out
+            </button>
+          </div>
+        ) : (
+          <div>Go + React</div>
+        )}
       </div>
     </aside>
   )
