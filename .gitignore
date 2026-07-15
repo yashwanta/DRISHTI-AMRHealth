@@ -45,3 +45,4 @@ data/config/*
 !data/config/
 !data/config/api-connections.example.json
 data/keys/
+backend.exe
