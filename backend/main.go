@@ -1706,6 +1706,12 @@ func tpLinkCandidateURLs(base *url.URL, command string) []string {
 		if path == "" {
 			return
 		}
+		if hashIndex := strings.Index(path, "#"); hashIndex >= 0 {
+			path = strings.TrimSpace(path[:hashIndex])
+			if path == "" {
+				path = "/"
+			}
+		}
 		if strings.Contains(path, "://") {
 			if !containsString(candidates, path) {
 				candidates = append(candidates, path)
@@ -1764,7 +1770,9 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	}
 	var lastOutput string
 	var lastStatus string
-	for _, target := range tpLinkCandidateURLs(base, source.Command) {
+	candidates := tpLinkCandidateURLs(base, source.Command)
+	for index := 0; index < len(candidates); index++ {
+		target := candidates[index]
 		body, status, err := tpLinkGet(client, target, username, password)
 		if err != nil {
 			lastStatus = err.Error()
@@ -1778,8 +1786,19 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
 			return reading, nil
 		}
+		for _, discovered := range tpLinkDiscoveredURLs(base, target, body) {
+			if !containsString(candidates, discovered) {
+				candidates = append(candidates, discovered)
+			}
+		}
+		if isTPLinkGuidePage(body) {
+			lastStatus = "TP-Link returned the tplogin.cn guide page, not the device status page. Use the AMR TP-Link IP URL only, enter the TP-Link password, then retry."
+		}
 	}
 	if lastOutput != "" {
+		if lastStatus != "" && strings.Contains(strings.ToLower(lastStatus), "tplogin.cn") {
+			return tpLinkReading{Output: lastOutput}, errors.New(lastStatus)
+		}
 		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but no RSSI/SNR fields were found")
 	}
 	if lastStatus == "" {
@@ -1788,6 +1807,58 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	return tpLinkReading{}, errors.New(lastStatus)
 }
 
+func tpLinkDiscoveredURLs(base *url.URL, currentTarget, body string) []string {
+	current, err := url.Parse(currentTarget)
+	if err != nil || current.Host == "" {
+		current = base
+	}
+	found := []string{}
+	appendCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		value = strings.ReplaceAll(value, `\/`, `/`)
+		if value == "" || strings.HasPrefix(value, "javascript:") || strings.HasPrefix(value, "data:") || strings.HasPrefix(value, "#") {
+			return
+		}
+		if strings.Contains(value, "#") {
+			value = strings.SplitN(value, "#", 2)[0]
+		}
+		next, err := url.Parse(value)
+		if err != nil {
+			return
+		}
+		resolved := current.ResolveReference(next)
+		if resolved.Scheme != "http" && resolved.Scheme != "https" {
+			return
+		}
+		if resolved.Host != base.Host {
+			return
+		}
+		resolved.Fragment = ""
+		candidate := resolved.String()
+		if !containsString(found, candidate) {
+			found = append(found, candidate)
+		}
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']([^"']+\.(?:js|json)(?:\?[^"']*)?)["']`),
+		regexp.MustCompile(`(?i)["']((?:/)?(?:data|api|userRpm|cgi-bin)/[^"'<>\\\s)]+)["']`),
+		regexp.MustCompile(`(?i)(?:url|path)\s*[:=]\s*["']([^"']*(?:status|station|wireless|wlan|ifstatus|link)[^"']*)["']`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(body, -1) {
+			if len(match) == 2 {
+				appendCandidate(match[1])
+			}
+		}
+	}
+	return found
+}
+
+func isTPLinkGuidePage(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "tplogin.cn") && strings.Contains(lower, "tp-link")
+}
 func tpLinkLoginAttempts(client *http.Client, base *url.URL, username, password string) error {
 	loginPaths := []string{"/cgi-bin/luci/", "/cgi-bin/luci/;stok=/login?form=login", "/login", "/"}
 	var lastErr error
