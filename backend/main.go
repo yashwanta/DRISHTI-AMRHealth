@@ -1728,8 +1728,16 @@ func tpLinkCandidateURLs(base *url.URL, command string) []string {
 	appendURL("/status.html")
 	appendURL("/userRpm/StatusRpm.htm")
 	appendURL("/data/status.json")
+	appendURL(fmt.Sprintf("/data/status.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
+	appendURL(fmt.Sprintf("/data/station.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
+	appendURL(fmt.Sprintf("/data/wireless.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
+	appendURL(fmt.Sprintf("/data/wlan.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
+	appendURL(fmt.Sprintf("/data/ifstatus.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
+	appendURL(fmt.Sprintf("/data/link_status.json?_dc=%d&autorefresh=true", time.Now().UnixMilli()))
 	appendURL("/cgi-bin/luci/;stok=/admin/status?form=all")
 	appendURL("/cgi-bin/luci/;stok=/admin/status?form=wireless")
+	appendURL("/cgi-bin/luci/;stok=/admin/status?form=status")
+	appendURL("/cgi-bin/luci/;stok=/admin/wireless?form=status")
 	return candidates
 }
 
@@ -1876,10 +1884,11 @@ func parseTPLinkReading(output string) tpLinkReading {
 	reading.SSID = parseSSID(output)
 	reading.SNR = parseFirstInt(output, []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bSNR\b[^-\d]*(\d+)\s*dB`),
+		regexp.MustCompile(`(?i)"(?:snr|snr_db|signal_noise_ratio)"\s*:\s*"?(\d+)`),
 		regexp.MustCompile(`(?i)\bsnr_db\b[^-\d]*(\d+)`),
 	})
-	reading.APName = parseLabelValue(output, []string{"BSSID", "AP MAC", "AP", "ap_name"})
-	reading.Channel = parseLabelValue(output, []string{"Channel", "channel"})
+	reading.APName = parseLabelValue(output, []string{"BSSID", "AP MAC", "AP", "ap_name", "apName", "root_ap", "root_ap_mac", "mac", "bssid"})
+	reading.Channel = parseLabelValue(output, []string{"Channel", "channel", "chan"})
 	reading.Band = parseBand(output)
 	return reading
 }
@@ -1902,6 +1911,7 @@ func parseLabelValue(output string, labels []string) string {
 		patterns := []*regexp.Regexp{
 			regexp.MustCompile(`(?im)^\s*` + regexp.QuoteMeta(label) + `\s*[:=]?\s*(.+?)\s*$`),
 			regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(label) + `"\s*:\s*"?([^",}\n]+)`),
+			regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(label) + `\b\s*[:=]\s*([^,}\n]+)`),
 		}
 		for _, pattern := range patterns {
 			match := pattern.FindStringSubmatch(output)
@@ -2037,6 +2047,8 @@ func parseSSID(output string) string {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?im)^\s*SSID:\s*(.+?)\s*$`),
 		regexp.MustCompile(`(?im)^\s*ssid\s*[=:]\s*(.+?)\s*$`),
+		regexp.MustCompile(`(?i)"(?:ssid|root_ap_ssid|ap_ssid|wireless_ssid)"\s*:\s*"([^"\n]+)`),
+		regexp.MustCompile(`(?i)\b(?:ssid|root ap ssid)\b\s*[:=]\s*([^\n,}]+)`),
 	}
 	for _, pattern := range patterns {
 		match := pattern.FindStringSubmatch(output)
@@ -2076,7 +2088,7 @@ func cleanSSID(value string) string {
 }
 
 func parseRSSI(output string) *int {
-	dualPattern := regexp.MustCompile(`(?i)\bRSSI\b[^-\d]*(-?\d+)\s*/\s*(-?\d+)\s*dBm`)
+	dualPattern := regexp.MustCompile(`(?i)\b(?:RSSI|Signal(?: Strength)?)\b[^-\d]*(-?\d+)\s*/\s*(-?\d+)\s*dBm`)
 	if match := dualPattern.FindStringSubmatch(output); len(match) == 3 {
 		first, firstErr := strconv.Atoi(match[1])
 		second, secondErr := strconv.Atoi(match[2])
@@ -2090,6 +2102,8 @@ func parseRSSI(output string) *int {
 	}
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)signal:\s*(-?\d+)\s*dBm`),
+		regexp.MustCompile(`(?i)"(?:signal|rssi|signal_strength|wireless_signal|signal_dbm)"\s*:\s*"?(-?\d+)`),
+		regexp.MustCompile(`(?i)\b(?:Signal Strength|Signal/Noise|Signal)\b[^-\d]*(-?\d+)\s*dBm`),
 		regexp.MustCompile(`(?i)rssi[^-\d]*(-?\d+)`),
 		regexp.MustCompile(`(?m)^\s*[A-Za-z0-9_.-]+:\s+\S+\s+\S+\s+(-?\d+)\.?`),
 	}
