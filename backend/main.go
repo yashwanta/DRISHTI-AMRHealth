@@ -1762,7 +1762,7 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		return tpLinkReading{}, err
 	}
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Timeout: 10 * time.Second, Jar: jar}
+	client := &http.Client{Timeout: 3 * time.Second, Jar: jar}
 	username := strings.TrimSpace(source.Username)
 	password := strings.TrimSpace(source.SecretRef)
 	if username != "" && password != "" && !isPlaceholderCredential(password) {
@@ -1771,7 +1771,12 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	var lastOutput string
 	var lastStatus string
 	candidates := tpLinkCandidateURLs(base, source.Command)
+	deadline := time.Now().Add(9 * time.Second)
 	for index := 0; index < len(candidates); index++ {
+		if time.Now().After(deadline) {
+			lastStatus = "TP-Link endpoint scan timed out before RSSI/SNR data was found. Open DevTools Network on the TP-Link page and copy the JSON request that contains RSSI/SNR."
+			break
+		}
 		target := candidates[index]
 		body, status, err := tpLinkGet(client, target, username, password)
 		if err != nil {
@@ -1793,6 +1798,8 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		}
 		if isTPLinkGuidePage(body) {
 			lastStatus = "TP-Link returned the tplogin.cn guide page, not the device status page. Use the AMR TP-Link IP URL only, enter the TP-Link password, then retry."
+		} else if isTPLinkSpaShell(body) {
+			lastStatus = "TP-Link Web UI shell loaded, but no JSON RSSI endpoint was found. Open DevTools Network on the TP-Link page and copy the data/status request that contains RSSI/SNR."
 		}
 	}
 	if lastOutput != "" {
@@ -1841,7 +1848,7 @@ func tpLinkDiscoveredURLs(base *url.URL, currentTarget, body string) []string {
 		}
 	}
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']([^"']+\.(?:js|json)(?:\?[^"']*)?)["']`),
+		regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']([^"']+\.json(?:\?[^"']*)?)["']`),
 		regexp.MustCompile(`(?i)["']((?:/)?(?:data|api|userRpm|cgi-bin)/[^"'<>\\\s)]+)["']`),
 		regexp.MustCompile(`(?i)(?:url|path)\s*[:=]\s*["']([^"']*(?:status|station|wireless|wlan|ifstatus|link)[^"']*)["']`),
 	}
@@ -1855,6 +1862,10 @@ func tpLinkDiscoveredURLs(base *url.URL, currentTarget, body string) []string {
 	return found
 }
 
+func isTPLinkSpaShell(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, `id="app"`) && strings.Contains(lower, `.js`) && (strings.Contains(lower, `tl-cpe`) || strings.Contains(lower, `tp-link`))
+}
 func isTPLinkGuidePage(body string) bool {
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "tplogin.cn") && strings.Contains(lower, "tp-link")
