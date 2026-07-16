@@ -1762,10 +1762,19 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		return tpLinkReading{}, err
 	}
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Timeout: 3 * time.Second, Jar: jar}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Jar:     jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	username := strings.TrimSpace(source.Username)
 	password := strings.TrimSpace(source.SecretRef)
 	if username != "" && password != "" && !isPlaceholderCredential(password) {
+		if reading, err := tpLinkDSReading(client, base, username, password); err == nil {
+			return reading, nil
+		}
 		_ = tpLinkLoginAttempts(client, base, username, password)
 	}
 	var lastOutput string
@@ -1799,12 +1808,18 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		if isTPLinkGuidePage(body) {
 			lastStatus = "TP-Link returned the tplogin.cn guide page, not the device status page. Use the AMR TP-Link IP URL only, enter the TP-Link password, then retry."
 		} else if isTPLinkSpaShell(body) {
-			lastStatus = "TP-Link Web UI shell loaded, but no JSON RSSI endpoint was found. Open DevTools Network on the TP-Link page and copy the data/status request that contains RSSI/SNR."
+			lastStatus = "TP-Link Web UI shell loaded, but protected RSSI tables require the TP-Link password. Enter the router password/reference in the write-only field, then retry."
 		}
 	}
 	if lastOutput != "" {
-		if lastStatus != "" && strings.Contains(strings.ToLower(lastStatus), "tplogin.cn") {
-			return tpLinkReading{Output: lastOutput}, errors.New(lastStatus)
+		if lastStatus != "" {
+			lowerStatus := strings.ToLower(lastStatus)
+			if strings.Contains(lowerStatus, "tplogin.cn") || strings.Contains(lowerStatus, "web ui shell") {
+				return tpLinkReading{Output: lastOutput}, errors.New(lastStatus)
+			}
+		}
+		if password == "" || isPlaceholderCredential(password) {
+			return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but protected RSSI/SNR tables require the TP-Link password/reference in the write-only field")
 		}
 		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but no RSSI/SNR fields were found")
 	}
@@ -1814,6 +1829,214 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	return tpLinkReading{}, errors.New(lastStatus)
 }
 
+func tpLinkDSReading(client *http.Client, base *url.URL, username, password string) (tpLinkReading, error) {
+	stok, loginOutput, err := tpLinkDSLogin(client, base, username, password)
+	if err != nil {
+		return tpLinkReading{Output: loginOutput}, err
+	}
+	var lastOutput string
+	var lastStatus string
+	for _, payload := range tpLinkDSStatusPayloads() {
+		body, status, err := tpLinkDSPost(client, base, stok, payload, username, password)
+		if err != nil {
+			lastStatus = err.Error()
+			continue
+		}
+		clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
+		lastOutput = clean
+		if code, ok := tpLinkErrorCode(body); ok && code != 0 {
+			lastStatus = fmt.Sprintf("TP-Link ds status request returned error_code %d", code)
+			continue
+		}
+		reading := parseTPLinkReading(clean)
+		reading.Output = clean
+		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
+			return reading, nil
+		}
+		lastStatus = status
+	}
+	if lastOutput != "" {
+		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link ds status responded, but no RSSI/SNR fields were found")
+	}
+	if lastStatus == "" {
+		lastStatus = "TP-Link ds status request did not return Wi-Fi telemetry"
+	}
+	return tpLinkReading{}, errors.New(lastStatus)
+}
+
+func tpLinkDSLogin(client *http.Client, base *url.URL, username, password string) (string, string, error) {
+	payload := map[string]any{
+		"method": "do",
+		"login": map[string]string{
+			"username": username,
+			"password": password,
+		},
+	}
+	body, _, err := tpLinkDSPost(client, base, "null", payload, username, password)
+	clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
+	if err != nil {
+		return "", clean, err
+	}
+	if code, ok := tpLinkErrorCode(body); ok && code != 0 {
+		return "", clean, fmt.Errorf("TP-Link login returned error_code %d", code)
+	}
+	stok := findTPLinkToken(body)
+	if stok == "" {
+		return "", clean, errors.New("TP-Link login succeeded but no session token was returned")
+	}
+	return stok, clean, nil
+}
+
+func tpLinkDSStatusPayloads() []map[string]any {
+	return []map[string]any{
+		{
+			"method": "get",
+			"device_info": map[string]any{
+				"name": []string{"info"},
+			},
+			"network": map[string]any{
+				"name": []string{"lan"},
+			},
+			"system": map[string]any{
+				"name": []string{"runtime", "sys", "system_time", "global_config", "cpu_usage", "mem_usage"},
+			},
+			"wireless": map[string]any{
+				"table": []string{"radio_entry", "wlan_wds", "wlan_wds_status", "cur_radio_state"},
+			},
+		},
+		{
+			"method": "get",
+			"wireless": map[string]any{
+				"table": []string{"wlan_wds", "wlan_wds_status", "cur_radio_state"},
+			},
+		},
+		{
+			"method": "get",
+			"wireless": map[string]any{
+				"table": []string{"cur_radio_state", "wlan_wds_status"},
+			},
+		},
+	}
+}
+
+func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, username, password string) (string, string, error) {
+	target := *base
+	target.Path = normalizePath("/stok="+url.PathEscape(stok)+"/ds", "/")
+	target.RawQuery = ""
+	target.Fragment = ""
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, target.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", "", err
+	}
+	origin := *base
+	origin.Path = ""
+	origin.RawQuery = ""
+	origin.Fragment = ""
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("Origin", strings.TrimRight(origin.String(), "/"))
+	req.Header.Set("Referer", strings.TrimRight(origin.String(), "/")+"/")
+	if username != "" && password != "" && !isPlaceholderCredential(password) {
+		req.SetBasicAuth(username, password)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if readErr != nil {
+		return "", resp.Status, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return string(body), resp.Status, fmt.Errorf("TP-Link ds returned %s", resp.Status)
+	}
+	return string(body), resp.Status, nil
+}
+
+func tpLinkErrorCode(body string) (int, bool) {
+	var payload any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return 0, false
+	}
+	code, ok := findNumericField(payload, "error_code")
+	if !ok {
+		return 0, false
+	}
+	return code, true
+}
+
+func findTPLinkToken(body string) string {
+	var payload any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return ""
+	}
+	for _, key := range []string{"stok", "token", "session", "session_id"} {
+		if value, ok := findStringField(payload, key); ok {
+			value = strings.TrimSpace(value)
+			if value != "" && !strings.EqualFold(value, "null") {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func findStringField(value any, field string) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if strings.EqualFold(key, field) {
+				if text, ok := nested.(string); ok {
+					return text, true
+				}
+			}
+			if text, ok := findStringField(nested, field); ok {
+				return text, true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if text, ok := findStringField(nested, field); ok {
+				return text, true
+			}
+		}
+	}
+	return "", false
+}
+
+func findNumericField(value any, field string) (int, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if strings.EqualFold(key, field) {
+				switch number := nested.(type) {
+				case float64:
+					return int(number), true
+				case string:
+					parsed, err := strconv.Atoi(strings.TrimSpace(number))
+					if err == nil {
+						return parsed, true
+					}
+				}
+			}
+			if number, ok := findNumericField(nested, field); ok {
+				return number, true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if number, ok := findNumericField(nested, field); ok {
+				return number, true
+			}
+		}
+	}
+	return 0, false
+}
 func tpLinkDiscoveredURLs(base *url.URL, currentTarget, body string) []string {
 	current, err := url.Parse(currentTarget)
 	if err != nil || current.Host == "" {
@@ -1921,6 +2144,13 @@ func tpLinkGet(client *http.Client, target, username, password string) (string, 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return "", resp.Status, err
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location := strings.ToLower(resp.Header.Get("Location"))
+		if strings.Contains(location, "tplogin.cn") || strings.Contains(location, "/login") || strings.Contains(location, "stok=null") {
+			return string(body), resp.Status, errors.New("TP-Link redirected to login; enter the router password/reference in the write-only field, then retry")
+		}
+		return string(body), resp.Status, fmt.Errorf("TP-Link redirected before status data was available: %s", resp.Status)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return string(body), resp.Status, fmt.Errorf("TP-Link returned %s", resp.Status)
