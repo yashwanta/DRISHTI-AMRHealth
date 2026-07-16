@@ -7,7 +7,7 @@ import type {
   AgentJob, AgentStartRequest
 } from '../types'
 
-const api = axios.create({ baseURL: '/siteops/api', withCredentials: true })
+const api = axios.create({ baseURL: '/api', withCredentials: true })
 
 api.interceptors.response.use(
   response => response,

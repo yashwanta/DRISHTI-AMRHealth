@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -23,6 +22,13 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/joho/godotenv"
+	"drishti-amr-health/internal/api"
+	"drishti-amr-health/internal/api/handlers"
+	"drishti-amr-health/internal/config"
+	"drishti-amr-health/internal/db"
+	"drishti-amr-health/internal/scheduler"
 )
 
 type APIConnection struct {
@@ -173,35 +179,99 @@ type Server struct {
 }
 
 func main() {
+	// Load .env if present.
+	_ = godotenv.Load()
+
 	port := env("PORT", "8090")
-	server := &Server{
+
+	// Native AMR Health server (wifi, bad-zones, plant proxy, connections).
+	nativeServer := &Server{
 		configPath: env("DRISHTI_API_CONFIG", filepath.Join("data", "config", "api-connections.json")),
 		staticDir:  env("DRISHTI_STATIC_DIR", filepath.Join("frontend", "dist")),
 		client:     &http.Client{Timeout: 20 * time.Second},
 		ackPath:    env("DRISHTI_ZONE_ACK_FILE", filepath.Join("data", "reports", "zone-acknowledgements.json")),
 	}
-	if err := server.initReportStore(); err != nil {
+	if err := nativeServer.initReportStore(); err != nil {
 		log.Printf("report store warning: %v", err)
 	}
-	defer server.close()
+	defer nativeServer.close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", server.handleHealth)
-	mux.HandleFunc("/api/connections", server.handleConnections)
-	mux.HandleFunc("/api/wifi/test", server.handleWifiTest)
-	mux.HandleFunc("/api/discovery", server.handleDiscovery)
-	mux.HandleFunc("/api/wifi/discover", server.handleWifiDiscover)
-	mux.HandleFunc("/api/reports/search/suggest", server.handleReportSearchSuggest)
-	mux.HandleFunc("/api/reports/events", server.handleReportEvents)
-	mux.HandleFunc("/api/reports/bad-zones/export", server.handleBadZonesExport)
-	mux.HandleFunc("/api/reports/bad-zones/", server.handleBadZoneReports)
-	mux.HandleFunc("/api/plants/", server.handlePlantProxy)
-	mux.HandleFunc("/siteops/api/", server.handleSiteOpsProxy)
-	mux.HandleFunc("/", server.handleStatic)
+	// Load config for the ported SiteOps handlers.
+	cfg := config.Load()
+	if cfg.EncryptionKey == "change-this-32-byte-secret-key!!" {
+		log.Fatalf("FATAL: ENCRYPTION_KEY is the placeholder default. Set a real 32-byte value.")
+	}
+	if cfg.SessionSecret == "" || strings.Contains(cfg.SessionSecret, "change-this") {
+		log.Fatalf("FATAL: SESSION_SECRET is missing or a placeholder.")
+	}
+
+	// Connect to PostgreSQL via pgxpool (same DB as SiteOps).
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+	pool, err := db.NewPool(dbCtx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("db connect: %v", err)
+	}
+	defer pool.Close()
+
+	// Run schema migrations (creates log_events, servers, rds_log_events, etc.
+	// if they don't already exist -- same tables as SiteOps).
+	if _, err := pool.Exec(context.Background(), db.Schema); err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
+	log.Println("database ready")
+
+	// ---- Scheduled log sync (runs independently from SiteOps) ----
+	sched := scheduler.New()
+	syncH := handlers.NewSyncHandler(pool, cfg.EncryptionKey)
+	if cfg.SyncOnStartup {
+		go func() {
+			delay := time.Duration(cfg.SyncStartupDelaySeconds) * time.Second
+			log.Printf("startup sync: waiting %s before first sync", delay)
+			time.Sleep(delay)
+			syncH.RunScheduled()
+		}()
+	}
+	if err := sched.Add(cfg.ScheduleAM, syncH.RunScheduled); err != nil {
+		log.Printf("scheduler AM: %v", err)
+	}
+	if err := sched.Add(cfg.SchedulePM, syncH.RunScheduled); err != nil {
+		log.Printf("scheduler PM: %v", err)
+	}
+	sched.Start()
+	defer sched.Stop()
+
+	// Build native handler wrappers.
+	native := &api.NativeHandlers{
+		Health:              nativeServer.handleHealth,
+		Connections:         nativeServer.handleConnections,
+		WifiTest:            nativeServer.handleWifiTest,
+		Discovery:           nativeServer.handleDiscovery,
+		WifiDiscover:        nativeServer.handleWifiDiscover,
+		ReportSearchSuggest: nativeServer.handleReportSearchSuggest,
+		ReportEvents:        nativeServer.handleReportEvents,
+		BadZonesExport:      nativeServer.handleBadZonesExport,
+		BadZoneReports:      nativeServer.handleBadZoneReports,
+		PlantProxy:          nativeServer.handlePlantProxy,
+	}
+
+	// Build the unified router (native + ported monitoring routes).
+	handler := api.NewRouter(pool, cfg, native)
+
+	// Static file fallback for the SPA.
+	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// If it starts with /api/, let the router handle it (404 if unknown).
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		// Otherwise serve static files.
+		nativeServer.handleStatic(w, r)
+	})
 
 	addr := ":" + port
 	log.Printf("DRISHTI AMR Health listening on http://localhost%s", addr)
-	if err := http.ListenAndServe(addr, logRequest(mux)); err != nil {
+	if err := http.ListenAndServe(addr, logRequest(finalHandler)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -582,29 +652,6 @@ func (s *Server) handleWifiDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 	response, status := s.discoverWifiRSSI(request)
 	writeJSON(w, status, response)
-}
-func (s *Server) handleSiteOpsProxy(w http.ResponseWriter, r *http.Request) {
-	targetStr := strings.TrimSpace(os.Getenv("SITEOPS_BACKEND_URL"))
-	if targetStr == "" {
-		targetStr = "http://localhost:8080"
-	}
-	target, err := url.Parse(targetStr)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("invalid SITEOPS_BACKEND_URL: %w", err))
-		return
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/siteops")
-		req.Host = target.Host
-	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("siteops proxy error for %s: %v", r.URL.Path, err)
-		writeError(w, http.StatusBadGateway, fmt.Errorf("SiteOps backend unreachable: %w", err))
-	}
-	proxy.ServeHTTP(w, r)
 }
 func (s *Server) handlePlantProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
