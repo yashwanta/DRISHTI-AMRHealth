@@ -1771,9 +1771,14 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	}
 	username := strings.TrimSpace(source.Username)
 	password := strings.TrimSpace(source.SecretRef)
+	var dsErr error
+	var dsOutput string
 	if username != "" && password != "" && !isPlaceholderCredential(password) {
 		if reading, err := tpLinkDSReading(client, base, username, password); err == nil {
 			return reading, nil
+		} else {
+			dsErr = err
+			dsOutput = reading.Output
 		}
 		_ = tpLinkLoginAttempts(client, base, username, password)
 	}
@@ -1820,6 +1825,13 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 		}
 		if password == "" || isPlaceholderCredential(password) {
 			return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but protected RSSI/SNR tables require the TP-Link password/reference in the write-only field")
+		}
+		if dsErr != nil {
+			output := lastOutput
+			if dsOutput != "" {
+				output = dsOutput
+			}
+			return tpLinkReading{Output: output}, fmt.Errorf("TP-Link ds API did not return RSSI/SNR: %w", dsErr)
 		}
 		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but no RSSI/SNR fields were found")
 	}
@@ -1940,9 +1952,6 @@ func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, 
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("Origin", strings.TrimRight(origin.String(), "/"))
 	req.Header.Set("Referer", strings.TrimRight(origin.String(), "/")+"/")
-	if username != "" && password != "" && !isPlaceholderCredential(password) {
-		req.SetBasicAuth(username, password)
-	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
@@ -2133,9 +2142,6 @@ func tpLinkGet(client *http.Client, target, username, password string) (string, 
 		return "", "", err
 	}
 	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
-	if username != "" && password != "" && !isPlaceholderCredential(password) {
-		req.SetBasicAuth(username, password)
-	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
