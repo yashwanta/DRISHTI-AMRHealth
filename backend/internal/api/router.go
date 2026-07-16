@@ -6,29 +6,29 @@ import (
 	"net/http"
 	"time"
 
+	"drishti-amr-health/internal/agent"
+	"drishti-amr-health/internal/api/handlers"
+	"drishti-amr-health/internal/config"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/cors"
-	"drishti-amr-health/internal/agent"
-	"drishti-amr-health/internal/api/handlers"
-	"drishti-amr-health/internal/config"
 )
 
 // NativeHandlers holds AMR Health's original handlers (wifi, connections,
 // bad-zones, plant proxy) that were in the single-file main.go. These are
 // injected from main.go so the router can serve both native and ported routes.
 type NativeHandlers struct {
-	Health     http.HandlerFunc
-	Connections http.HandlerFunc
-	WifiTest   http.HandlerFunc
-	Discovery  http.HandlerFunc
-	WifiDiscover http.HandlerFunc
+	Health              http.HandlerFunc
+	Connections         http.HandlerFunc
+	WifiTest            http.HandlerFunc
+	Discovery           http.HandlerFunc
+	WifiDiscover        http.HandlerFunc
 	ReportSearchSuggest http.HandlerFunc
-	ReportEvents  http.HandlerFunc
-	BadZonesExport http.HandlerFunc
-	BadZoneReports http.HandlerFunc
-	PlantProxy   http.HandlerFunc
+	ReportEvents        http.HandlerFunc
+	BadZonesExport      http.HandlerFunc
+	BadZoneReports      http.HandlerFunc
+	PlantProxy          http.HandlerFunc
 }
 
 func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) http.Handler {
@@ -69,16 +69,37 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 	r.Route("/api", func(r chi.Router) {
 		// ---- AMR Health native routes (wifi, connections, bad-zones) ----
 		if native != nil {
-			if native.Health != nil { r.Get("/health", native.Health) }
-			if native.Connections != nil { r.Get("/connections", native.Connections); r.Post("/connections", native.Connections) }
-			if native.WifiTest != nil { r.Post("/wifi/test", native.WifiTest) }
-			if native.Discovery != nil { r.Get("/discovery", native.Discovery) }
-			if native.WifiDiscover != nil { r.Post("/wifi/discover", native.WifiDiscover) }
-			if native.ReportSearchSuggest != nil { r.Get("/reports/search/suggest", native.ReportSearchSuggest) }
-			if native.ReportEvents != nil { r.Get("/reports/events", native.ReportEvents) }
-			if native.BadZonesExport != nil { r.Get("/reports/bad-zones/export", native.BadZonesExport) }
-			if native.BadZoneReports != nil { r.Get("/reports/bad-zones/{zone}", native.BadZoneReports) }
-			if native.PlantProxy != nil { r.Get("/plants/{plant}", native.PlantProxy) }
+			if native.Health != nil {
+				r.Get("/health", native.Health)
+			}
+			if native.Connections != nil {
+				r.Get("/connections", native.Connections)
+				r.Post("/connections", native.Connections)
+			}
+			if native.WifiTest != nil {
+				r.Post("/wifi/test", native.WifiTest)
+			}
+			if native.Discovery != nil {
+				r.Get("/discovery", native.Discovery)
+			}
+			if native.WifiDiscover != nil {
+				r.Post("/wifi/discover", native.WifiDiscover)
+			}
+			if native.ReportSearchSuggest != nil {
+				r.Get("/reports/search/suggest", native.ReportSearchSuggest)
+			}
+			if native.ReportEvents != nil {
+				r.Get("/reports/events", native.ReportEvents)
+			}
+			if native.BadZonesExport != nil {
+				r.Get("/reports/bad-zones/export", native.BadZonesExport)
+			}
+			if native.BadZoneReports != nil {
+				r.Get("/reports/bad-zones/{zone}", native.BadZoneReports)
+			}
+			if native.PlantProxy != nil {
+				r.Get("/plants/{plant}/rds/{endpoint}", native.PlantProxy)
+			}
 		}
 
 		// ---- Ported SiteOps routes (logs, monitoring, AMR, agent) ----
