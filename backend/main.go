@@ -1909,7 +1909,7 @@ func tpLinkDSError(body string, fallback error) error {
 		if seconds, ok := tpLinkNumericDataField(body, "time"); ok && seconds > 0 {
 			waitMessage = fmt.Sprintf(" Wait about %d seconds before retrying.", seconds)
 		}
-		return fmt.Errorf("TP-Link rejected the login (error_code -40401). Check the TP-Link admin username/password; repeated failed attempts can temporarily lock login.%s", waitMessage)
+		return fmt.Errorf("TP-Link rejected the backend login (error_code -40401). The browser TP-Link session is separate from DRISHTI; enter the same TP-Link admin username/password in DRISHTI. Repeated failed attempts can temporarily lock login.%s", waitMessage)
 	}
 	return fallback
 }
@@ -1927,6 +1927,12 @@ func tpLinkNumericDataField(body string, field string) (int, bool) {
 }
 func tpLinkDSStatusPayloads() []map[string]any {
 	return []map[string]any{
+		{
+			"method": "get",
+			"wireless": map[string]any{
+				"table": []string{"wlan_wds", "wlan_wds_status"},
+			},
+		},
 		{
 			"method": "get",
 			"device_info": map[string]any{
