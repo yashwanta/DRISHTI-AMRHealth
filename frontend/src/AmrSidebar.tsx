@@ -23,8 +23,8 @@ export function AmrSidebar() {
   return (
     <aside className="w-56 flex-shrink-0 bg-gray-900 text-gray-300 flex flex-col">
       <div className="flex items-center gap-2.5 px-5 py-5 border-b border-gray-700">
-        <div className="h-8 w-8 rounded-lg bg-blue-600/20 border border-blue-500/40 flex items-center justify-center">
-          <span className="text-blue-300 font-bold text-sm">D</span>
+        <div className="h-10 w-10 rounded-lg bg-gray-950/40 border border-blue-500/30 flex items-center justify-center overflow-hidden">
+          <img src="/Drishti_AMRHealth-logo4.png" alt="DRISHTI AMR Health logo" className="h-full w-full object-contain" />
         </div>
         <div>
           <span className="font-bold text-white text-base tracking-wide">DRISHTI</span>
