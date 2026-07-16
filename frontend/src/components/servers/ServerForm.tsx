@@ -54,6 +54,10 @@ export default function ServerForm({ initial, defaultAssetType = 'server', submi
     return ''
   }
 
+  const errorMessage = (error: unknown) => {
+    const candidate = error as { response?: { data?: { error?: string; message?: string } }; message?: string }
+    return candidate.response?.data?.error ?? candidate.response?.data?.message ?? candidate.message ?? 'Save failed. Please try again.'
+  }
   const ubuntuKeyHint = form.auth_type === 'key' ? privateKeyHint(form.private_key) : ''
   const pveKeyHint = (form.proxmox_auth_type ?? 'password') === 'key' ? privateKeyHint(form.proxmox_private_key) : ''
 
@@ -64,9 +68,14 @@ export default function ServerForm({ initial, defaultAssetType = 'server', submi
     }
     setTesting(true)
     setTestResult(null)
-    const res = await testConnection(form)
-    setTestResult({ success: res.success, msg: res.error ?? res.info ?? '' })
-    setTesting(false)
+    try {
+      const res = await testConnection(form)
+      setTestResult({ success: res.success, msg: res.error ?? res.info ?? '' })
+    } catch (error) {
+      setTestResult({ success: false, msg: errorMessage(error) })
+    } finally {
+      setTesting(false)
+    }
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -76,8 +85,14 @@ export default function ServerForm({ initial, defaultAssetType = 'server', submi
       return
     }
     setSaving(true)
-    await onSubmit(form)
-    setSaving(false)
+    setTestResult(null)
+    try {
+      await onSubmit(form)
+    } catch (error) {
+      setTestResult({ success: false, msg: errorMessage(error) })
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (

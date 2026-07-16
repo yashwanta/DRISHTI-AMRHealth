@@ -1,13 +1,13 @@
-﻿package handlers
+package handlers
 
 import (
 	"encoding/json"
 	"net/http"
 	"strconv"
 
+	"drishti-amr-health/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"drishti-amr-health/internal/models"
 )
 
 type ServerHandler struct {
@@ -183,7 +183,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		vmid=$15, app_log_paths=$16, os_type=$17
 		WHERE id=$18
 		RETURNING id, name, host, port, username, auth_type, asset_type,
-		          proxmox_host, proxmox_port, proxmox_username, proxmox_auth_type, vmid, app_log_paths,
+		          proxmox_host, proxmox_port, proxmox_username, proxmox_auth_type, vmid, app_log_paths, os_type,
 		          last_sync_at, status, created_at`,
 		req.Name, req.Host, req.Port, req.Username, req.AuthType, passEnc, keyEnc,
 		req.AssetType,
