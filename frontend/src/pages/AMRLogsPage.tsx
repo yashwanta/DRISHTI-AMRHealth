@@ -46,7 +46,7 @@ const anyIPRe = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g
 const tcpRowRe = /\S+\s+\d+\s+\d+\s+[\d.]+:\d+\s+([\d.]+):(\d+)/
 
 function ipFromMessage(msg: string, source?: string): string {
-  // live_amr_tcp: "ESTAB 0 0 10.222.10.76:60606 10.222.42.27:19206"
+  // live_amr_tcp: "ESTAB 0 0 <fleet-manager-ip>:60606 <amr-ip>:19206"
   if (source === 'live_amr_tcp') {
     const m = tcpRowRe.exec(msg)
     if (m) return m[1] // destination IP = AMR IP

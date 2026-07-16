@@ -21,6 +21,7 @@ type ZoneEvent = { timestamp: string; amr: string; rds_delay_ms: number; duratio
 type ZoneAcknowledgement = { id: number; zone_id: string; plant_id: string; ack_by: string; ack_at: string; notes: string };
 type ZoneEventsResponse = { zone_id: string; plant_id: string; events: ZoneEvent[]; acknowledgement?: ZoneAcknowledgement };
 type WifiSource = { plant: string; name: string; method: "AMR SSH" | "Controller API" | "Manual Import"; host: string; username: string; secretRef: string; command: string; savedAt: string };
+type IpOverride = { plant: string; amr: string; ip: string; updatedAt: string };
 type WifiTestResult = { ok: boolean; status?: string; method: string; host: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: string };
 type WifiDiscoverResult = { ok: boolean; status?: string; plant: string; amr: string; host: string; command?: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: WifiPoint["quality"] | "Unknown" };
 type WifiDiscoverResponse = { ok: boolean; message: string; results?: WifiDiscoverResult[] | null };
@@ -28,7 +29,7 @@ type DiscoveryAMR = { plant: string; amr: string; rssi_dbm?: number | null; snr_
 type DiscoverySortKey = "amr" | "plant" | "rssi_dbm" | "snr_db" | "ap_name" | "band" | "channel" | "last_seen" | "source";
 type AppState = {
   amrs: AMR[]; wifiPoints: WifiPoint[]; logs: LogEntry[]; badZones: BadZone[]; sceneMaps: Record<string, SceneMap>;
-  wifiSources: WifiSource[]; confidenceSamples: ConfidenceSample[];
+  wifiSources: WifiSource[]; confidenceSamples: ConfidenceSample[]; ipOverrides: IpOverride[];
   discovery: { point: string; status: string; source: string; command: string; gap: string }[];
   rdsImportNote: string; uploadedMap: string;
 };
@@ -48,6 +49,7 @@ const seed: AppState = {
   sceneMaps: {},
   wifiSources: [],
   confidenceSamples: [],
+  ipOverrides: [],
   discovery: [
     { point: "AMR live position", status: "Not Run", source: "Go RDS proxy", command: "GET /api/plants/{plant}/rds/core", gap: "Needs configured plant URL" },
     { point: "AMR map X/Y coordinates", status: "Not Run", source: "RDS core", command: "rbk_report.x / rbk_report.y", gap: "Scene geometry alignment still needed" },
@@ -61,6 +63,26 @@ const seed: AppState = {
 function slug(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""); }
 function unique(values: string[]) { return [...new Set(values.filter(Boolean))].sort(); }
 function badge(value: string) { return <span className={`badge ${value.toLowerCase().replace(/\s+/g, "-")}`}>{value}</span>; }
+function normalizeAmrName(value: string) {
+  const match = value.trim().toUpperCase().match(/AMR[-_]?0*(\d+)/);
+  return match ? `AMR-${match[1].padStart(2, "0")}` : value.trim().toUpperCase();
+}
+function ipOverrideKey(plant: string, amr: string) { return `${plant.trim().toLowerCase()}|${normalizeAmrName(amr)}`; }
+function isIPv4(value: string) { return /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(value.trim()); }
+function applyIpOverrides(amrs: AMR[], overrides: IpOverride[] = []) {
+  const byKey = new Map(overrides.map((item) => [ipOverrideKey(item.plant, item.amr), item]));
+  return amrs.map((amr) => {
+    const override = byKey.get(ipOverrideKey(amr.plant, amr.name));
+    if (!override?.ip) return amr;
+    return {
+      ...amr,
+      ip: override.ip,
+      source: `${amr.source || "RDS Core"} + local IP override`,
+      connectivityReason: `${amr.connectivityReason || "RDS Core source"}; IP overridden locally because RDS can retain stale IPs while disconnected.`,
+      issue: `${amr.issue || "RDS Core source"}; IP overridden locally because RDS can retain stale IPs while disconnected.` 
+    };
+  });
+}
 function hasRealRssi(value?: number | null) { return typeof value === "number" && Number.isFinite(value) && value !== 0; }
 function rssiSignalTier(value?: number | null) {
   if (!hasRealRssi(value)) return "none";
@@ -582,6 +604,8 @@ export default function AmrHealthApp() {
   const [eventsLive, setEventsLive] = useState(false);
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState<LogEntry | null>(null);
   const [apiForm, setApiForm] = useState<APIConnection>({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
+  const [ipOverrideForm, setIpOverrideForm] = useState<IpOverride>({ plant: "Springfield", amr: "", ip: "", updatedAt: "" });
+  const [ipOverrideError, setIpOverrideError] = useState("");
   const [wifiForm, setWifiForm] = useState<Omit<WifiSource, "savedAt">>({ plant: "Shelbyville", name: "AMR Wi-Fi RSSI", method: "AMR SSH", host: "", username: "", secretRef: "CyberArk or SSH key reference", command: "iw dev [auto] link" });
   const [wifiTest, setWifiTest] = useState<WifiTestResult | null>(null);
   const [wifiDiscover, setWifiDiscover] = useState<WifiDiscoverResponse | null>(null);
@@ -1096,16 +1120,19 @@ export default function AmrHealthApp() {
     setScanStatus(`Deleted ${keys.size} visible saved confidence scans.`);
   }
   function mergeImport(normalized: NormalizedRds, nextView: View = "dashboard") {
-    setState((current) => ({
+    setState((current) => {
+      const importedAmrs = applyIpOverrides(normalized.amrs, current.ipOverrides || []);
+      return {
       ...current,
-      amrs: current.amrs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.amrs),
+      amrs: current.amrs.filter((item) => item.plant !== normalized.summary.plant).concat(importedAmrs),
       wifiPoints: current.wifiPoints.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.points),
       logs: current.logs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.logs),
-      badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant).concat(deriveBadZones(normalized.amrs, normalized.points)),
-      confidenceSamples: mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(normalized.summary.plant, normalized.amrs, normalized.points, current.sceneMaps[normalized.summary.plant]?.md5 || normalized.summary.sceneMd5)),
+      badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant).concat(deriveBadZones(importedAmrs, normalized.points)),
+      confidenceSamples: mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(normalized.summary.plant, importedAmrs, normalized.points, current.sceneMaps[normalized.summary.plant]?.md5 || normalized.summary.sceneMd5)),
       rdsImportNote: `Imported ${normalized.summary.robots} ${normalized.summary.plant} AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`,
       discovery: current.discovery.map((item) => item.point.includes("AMR ") || item.point.includes("RDS ") ? { ...item, status: "Available", source: "Go RDS proxy", gap: `Updated from ${normalized.summary.plant} core feed` } : item)
-    }));
+      };
+    });
     setView(nextView);
   }
   async function pullLiveCore() {
@@ -1201,6 +1228,37 @@ export default function AmrHealthApp() {
     const response = await fetch("/api/connections", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (response.ok) setConnections(await response.json() as APIConnection[]);
     setApiForm({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
+  }
+  function saveIpOverride(event: React.FormEvent) {
+    event.preventDefault();
+    const plant = ipOverrideForm.plant.trim() || selectedImportPlant;
+    const amr = normalizeAmrName(ipOverrideForm.amr);
+    const ip = ipOverrideForm.ip.trim();
+    if (!plant || !amr || !ip) { setIpOverrideError("Plant, AMR, and IP are required."); return; }
+    if (!isIPv4(ip)) { setIpOverrideError("Enter a valid IPv4 address, for example 10.222.42.19."); return; }
+    const nextOverride = { plant, amr, ip, updatedAt: new Date().toISOString() };
+    setState((current) => {
+      const remaining = (current.ipOverrides || []).filter((item) => ipOverrideKey(item.plant, item.amr) !== ipOverrideKey(plant, amr));
+      return {
+        ...current,
+        ipOverrides: remaining.concat(nextOverride),
+        amrs: applyIpOverrides(current.amrs, remaining.concat(nextOverride)),
+        rdsImportNote: `Saved local IP override for ${plant} ${amr}. Raw RDS snapshots are unchanged.`
+      };
+    });
+    setIpOverrideError("");
+    setIpOverrideForm({ plant, amr: "", ip: "", updatedAt: "" });
+  }
+  function deleteIpOverride(item: IpOverride) {
+    setState((current) => {
+      const remaining = (current.ipOverrides || []).filter((override) => ipOverrideKey(override.plant, override.amr) !== ipOverrideKey(item.plant, item.amr));
+      return {
+        ...current,
+        ipOverrides: remaining,
+        amrs: applyIpOverrides(current.amrs.map((amr) => ipOverrideKey(amr.plant, amr.name) === ipOverrideKey(item.plant, item.amr) ? { ...amr, ip: "unknown" } : amr), remaining),
+        rdsImportNote: `Removed local IP override for ${item.plant} ${item.amr}. Pull RDS again to restore the RDS-reported IP.`
+      };
+    });
   }
   async function testWifiSource(source?: WifiSource) {
     const selectedPlant = source?.plant || wifiForm.plant.trim() || selectedImportPlant;
@@ -1307,7 +1365,7 @@ export default function AmrHealthApp() {
     <main className="main-content"><header className="topbar"><div><h1>{view === "dashboard" ? "AMR Health Dashboard" : view[0].toUpperCase() + view.slice(1)}</h1><p>Go backend, React UI, local config, and local-only RDS snapshots.</p></div><div className="topbar-controls"><label className="field compact"><span>Plant</span><select value={plantFilter} onChange={(e) => setPlantFilter(e.target.value)}><option>All</option>{plantOptions.map((plant) => <option key={plant}>{plant}</option>)}</select></label><div className="field search-field report-search-field"><span>Search</span><div className="search-box"><input ref={searchInputRef} value={search} onChange={(e) => { setSearch(e.target.value); if (view === "reports") setShowSearchSuggestions(true); }} onFocus={() => view === "reports" && setShowSearchSuggestions(true)} placeholder={view === "reports" ? "Search reports (Ctrl+K)" : view === "scans" ? "Saved scan, AMR, plant, map" : "AMR, IP, zone, AP, topic"} />{search && <button className="search-clear" type="button" onClick={() => { setSearch(""); setDebouncedSearch(""); setSearchSuggestions([]); setShowSearchSuggestions(false); searchInputRef.current?.focus(); }} aria-label="Clear search">X</button>}</div>{view === "reports" && showSearchSuggestions && searchSuggestions.length > 0 && <div className="suggestion-list">{searchSuggestions.map((suggestion) => <button key={suggestion} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { setSearch(suggestion); setDebouncedSearch(suggestion); setSearchSuggestions([]); setShowSearchSuggestions(false); searchInputRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div></div></header>
       {view === "dashboard" && <section className="view active-view"><div className="metric-grid">{metrics.map(([label, value, help]) => <article className="metric-card" key={label}><span className="metric-label">{label}</span><strong className="metric-value">{value}</strong><small className="metric-help">{help}</small></article>)}</div><div className="content-grid two-col"><section className="panel wide-panel"><div className="panel-header"><div><h2>AMR Fleet Health</h2><p>Investigate disconnects, offline time, and worst drop locations.</p></div><button className="primary-action" onClick={pullLiveCore} disabled={!connections.length || Boolean(busy)}>{busy || "Pull Selected RDS"}</button></div><div className="table-wrap"><table><thead><tr><th>AMR Name</th><th>Plant</th><th>IP</th><th>Status</th><th>Reconnect</th><th>Disconnect</th><th>Offline</th><th>Worst Drop</th><th>Investigate</th></tr></thead><tbody>{filteredAmrs.map((amr) => <tr key={amr.id}><td><strong>{amr.name}</strong></td><td>{amr.plant}</td><td>{amr.ip}</td><td>{badge(amr.status)}</td><td>{amr.reconnects}</td><td>{amr.disconnects}</td><td>{amr.offline}</td><td>{amr.worstDrop}</td><td><button className="row-action" onClick={() => setSelectedAmr(amr)}>Open</button></td></tr>)}</tbody></table></div></section><section className="panel"><div className="panel-header stacked"><h2>Bad Zone Areas</h2><p>Top repeated drop, reconnect, offline, and weak Wi-Fi areas.</p></div><div className="zone-list">{visibleBadZones.length ? visibleBadZones.map((zone) => <article className="zone-card" key={`${zone.plant}-${zone.zone}`}><header><strong>{zone.zone}</strong><span>{zone.score}</span></header><small>{zone.plant} - {zone.disconnects} disconnects, {zone.reconnects} reconnects, robots {(zone.robots || []).join(", ") || "none"}</small><small>{zone.reason || "Computed from current AMR connectivity"}</small><div className="score-bar"><span style={{ width: `${Math.min(zone.score, 100)}%` }}></span></div></article>) : <article className="zone-card"><strong>No Bad Zones</strong><small>Current RDS sample does not show disconnected, weak, or poor AMR connectivity in scope.</small></article>}</div></section></div>{selectedAmr && <section className="panel detail-panel" ref={detailPanelRef}><div className="panel-header stacked"><h2>{selectedAmr.name} Detail</h2><p>{selectedAmr.plant} - {selectedAmr.ip} - worst drop: {selectedAmr.worstDrop}</p></div><div className="detail-grid">{[["Status", selectedAmr.status], ["Battery", selectedAmr.battery || "unknown"], ["RDS Position", selectedAmr.rdsX !== undefined ? `x ${selectedAmr.rdsX}, y ${selectedAmr.rdsY}` : "unknown"], ["Issue", selectedAmr.issue || "No issue"], ["Map / Model", `${selectedAmr.mapMd5 || "unknown"} / ${selectedAmr.modelMd5 || "unknown"}`]].map(([label, value]) => <article className="detail-card" key={label}><span>{label}</span><strong>{value}</strong></article>)}</div></section>}</section>}
       {view === "admin" && <section className="view active-view"><div className="admin-grid"><section className="panel"><div className="panel-header stacked"><h2>RDS Core Import</h2><p>Pull live RDS through the Go backend or import saved core JSON.</p></div><div className="import-actions"><label className="field compact"><span>Plant</span><select value={selectedImportPlant} onChange={(e) => setSelectedImportPlant(e.target.value)}>{plantOptions.map((plant) => <option key={plant}>{plant}</option>)}</select></label><button className="primary-action" onClick={pullLiveCore} disabled={Boolean(busy)}>{busy || "Pull Live Core"}</button><label className="file-action">Import Core JSON<input type="file" accept=".json,application/json" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} /></label><button className="ghost-action" onClick={() => setState((current) => ({ ...current, amrs: current.amrs.filter((item) => !item.imported), wifiPoints: current.wifiPoints.filter((item) => !item.imported), logs: current.logs.filter((item) => !item.imported), rdsImportNote: "Imported RDS data cleared." }))}>Reset Imported Data</button></div><div className="threshold-note">{state.rdsImportNote}</div></section><section className="panel wide-panel"><div className="panel-header stacked"><h2>RDS API Connections</h2><p>Saved in local backend config, not committed to Git.</p></div><form className="form-grid" onSubmit={saveConnection}><label className="field"><span>Plant</span><input value={apiForm.plant} onChange={(e) => setApiForm({ ...apiForm, plant: e.target.value })} required placeholder="Shelbyville" /></label><label className="field"><span>Base URL</span><input value={apiForm.baseUrl} onChange={(e) => setApiForm({ ...apiForm, baseUrl: e.target.value })} required placeholder="http://rds-host:8080" /></label><label className="field"><span>Core Path</span><input value={apiForm.corePath} onChange={(e) => setApiForm({ ...apiForm, corePath: e.target.value })} required /></label><label className="field"><span>Scene Path</span><input value={apiForm.scenePath} onChange={(e) => setApiForm({ ...apiForm, scenePath: e.target.value })} required /></label><button className="primary-action" type="submit">Save Connection</button></form><div className="api-list">{connections.map((connection) => <article className="api-card" key={connection.plant}><header><strong>{connection.plant}</strong><button className="row-action" onClick={() => setApiForm(connection)}>Edit</button></header><div className="api-links"><span>Base <code>{connection.baseUrl}</code></span><span>Core <a href={apiUrl(connection, "corePath")} target="_blank">{apiUrl(connection, "corePath")}</a></span><span>Scene <a href={apiUrl(connection, "scenePath")} target="_blank">{apiUrl(connection, "scenePath")}</a></span><span>Local <code>/api/plants/{slug(connection.plant)}/rds/core</code></span></div></article>)}</div></section></div></section>}
-      {view === "logs" && <section className="view active-view"><section className="panel filter-panel"><div className="panel-header"><div><h2>Log Investigation</h2><p>Filter AMR, RDS, Ubuntu, network, and VM evidence.</p></div><div className="log-filter-grid"><label className="field compact"><span>AMR</span><input value={logAmrFilter} onChange={(e) => setLogAmrFilter(e.target.value)} placeholder="AMR-01" /></label><label className="field compact"><span>From</span><input type="datetime-local" value={logStart} onChange={(e) => setLogStart(e.target.value)} /></label><label className="field compact"><span>To</span><input type="datetime-local" value={logEnd} onChange={(e) => setLogEnd(e.target.value)} /></label><label className="field compact"><span>Keyword</span><input value={logKeyword} onChange={(e) => setLogKeyword(e.target.value)} placeholder="disconnect, map, battery" /></label><button className="ghost-action" type="button" onClick={() => { setLogAmrFilter(""); setLogStart(""); setLogEnd(""); setLogKeyword(""); }}>Clear</button></div></div></section><section className="panel"><div className="table-wrap"><table><thead><tr><th>Time</th><th>Plant</th><th>AMR</th><th>Topic</th><th>Source</th><th>Severity</th><th>Message</th></tr></thead><tbody>{filteredLogs.map((log, index) => <tr key={index}><td>{new Date(log.time).toLocaleString()}</td><td>{log.plant}</td><td>{log.amr}</td><td>{log.topic}</td><td>{log.source}</td><td>{badge(log.severity)}</td><td>{log.message}</td></tr>)}</tbody></table></div></section></section>}
+      {view === "admin" && <section className="view active-view"><section className="panel wide-panel"><div className="panel-header stacked"><h2>AMR IP Overrides</h2><p>Use only when RDS keeps a stale IP for a disconnected AMR. Stored in browser local storage; raw RDS snapshots stay unchanged.</p></div><form className="form-grid" onSubmit={saveIpOverride}><label className="field"><span>Plant</span><select value={ipOverrideForm.plant} onChange={(e) => setIpOverrideForm({ ...ipOverrideForm, plant: e.target.value })}>{plantOptions.filter((plant) => plant !== "All").map((plant) => <option key={plant}>{plant}</option>)}</select></label><label className="field"><span>AMR</span><input value={ipOverrideForm.amr} onChange={(e) => setIpOverrideForm({ ...ipOverrideForm, amr: e.target.value })} placeholder="AMR-02" /></label><label className="field"><span>Correct IP</span><input value={ipOverrideForm.ip} onChange={(e) => { setIpOverrideForm({ ...ipOverrideForm, ip: e.target.value }); setIpOverrideError(""); }} placeholder="10.x.x.x" />{ipOverrideError && <small className="field-error">{ipOverrideError}</small>}</label><button className="primary-action" type="submit">Save IP Override</button></form><div className="api-list">{(state.ipOverrides || []).length ? (state.ipOverrides || []).map((item) => <article className="api-card" key={ipOverrideKey(item.plant, item.amr)}><header><strong>{item.plant} {item.amr}</strong><button className="row-action" onClick={() => deleteIpOverride(item)}>Remove</button></header><div className="api-links"><span>Override IP <code>{item.ip}</code></span><span>Saved {new Date(item.updatedAt).toLocaleString()}</span></div></article>) : <article className="api-card"><strong>No AMR IP overrides</strong><span>RDS-reported IPs are used as-is.</span></article>}</div></section></section>}      {view === "logs" && <section className="view active-view"><section className="panel filter-panel"><div className="panel-header"><div><h2>Log Investigation</h2><p>Filter AMR, RDS, Ubuntu, network, and VM evidence.</p></div><div className="log-filter-grid"><label className="field compact"><span>AMR</span><input value={logAmrFilter} onChange={(e) => setLogAmrFilter(e.target.value)} placeholder="AMR-01" /></label><label className="field compact"><span>From</span><input type="datetime-local" value={logStart} onChange={(e) => setLogStart(e.target.value)} /></label><label className="field compact"><span>To</span><input type="datetime-local" value={logEnd} onChange={(e) => setLogEnd(e.target.value)} /></label><label className="field compact"><span>Keyword</span><input value={logKeyword} onChange={(e) => setLogKeyword(e.target.value)} placeholder="disconnect, map, battery" /></label><button className="ghost-action" type="button" onClick={() => { setLogAmrFilter(""); setLogStart(""); setLogEnd(""); setLogKeyword(""); }}>Clear</button></div></div></section><section className="panel"><div className="table-wrap"><table><thead><tr><th>Time</th><th>Plant</th><th>AMR</th><th>Topic</th><th>Source</th><th>Severity</th><th>Message</th></tr></thead><tbody>{filteredLogs.map((log, index) => <tr key={index}><td>{new Date(log.time).toLocaleString()}</td><td>{log.plant}</td><td>{log.amr}</td><td>{log.topic}</td><td>{log.source}</td><td>{badge(log.severity)}</td><td>{log.message}</td></tr>)}</tbody></table></div></section></section>}
       {view === "discovery" && <section className="view active-view"><div className="admin-grid">
         <section className="panel">
           <div className="panel-header stacked"><h2>Wi-Fi RSSI Source</h2><p>Add the source used to collect live signal strength. Store a vault/key reference here, not a password.</p></div>
