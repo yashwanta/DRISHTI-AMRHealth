@@ -20,10 +20,10 @@ type BadZone = { plant: string; zone: string; disconnects: number; reconnects: n
 type ZoneEvent = { timestamp: string; amr: string; rds_delay_ms: number; duration_ms: number; reconnected_at: string };
 type ZoneAcknowledgement = { id: number; zone_id: string; plant_id: string; ack_by: string; ack_at: string; notes: string };
 type ZoneEventsResponse = { zone_id: string; plant_id: string; events: ZoneEvent[]; acknowledgement?: ZoneAcknowledgement };
-type WifiSource = { plant: string; name: string; method: "AMR SSH" | "Controller API" | "Manual Import"; host: string; username: string; secretRef: string; command: string; savedAt: string };
+type WifiSource = { plant: string; name: string; method: "AMR SSH" | "TP-Link Web UI" | "Controller API" | "Manual Import"; host: string; username: string; secretRef: string; command: string; savedAt: string };
 type IpOverride = { plant: string; amr: string; ip: string; updatedAt: string };
-type WifiTestResult = { ok: boolean; status?: string; method: string; host: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: string };
-type WifiDiscoverResult = { ok: boolean; status?: string; plant: string; amr: string; host: string; command?: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: WifiPoint["quality"] | "Unknown" };
+type WifiTestResult = { ok: boolean; status?: string; method: string; host: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: string; snr_db?: number; ap_name?: string; band?: string; channel?: string };
+type WifiDiscoverResult = { ok: boolean; status?: string; plant: string; amr: string; host: string; command?: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: WifiPoint["quality"] | "Unknown"; snr_db?: number; ap_name?: string; band?: string; channel?: string };
 type WifiDiscoverResponse = { ok: boolean; message: string; results?: WifiDiscoverResult[] | null };
 type DiscoveryAMR = { plant: string; amr: string; rssi_dbm?: number | null; snr_db?: number | null; ap_name?: string; band?: string; channel?: string; last_seen?: string; source?: string };
 type DiscoverySortKey = "amr" | "plant" | "rssi_dbm" | "snr_db" | "ap_name" | "band" | "channel" | "last_seen" | "source";
@@ -131,7 +131,10 @@ function locationMatches(current: string | undefined, home: string) {
   const homeKey = normalizeLocation(home);
   return Boolean(currentKey && homeKey && (currentKey === homeKey || currentKey.includes(homeKey) || homeKey.includes(currentKey)));
 }
-function isPlaceholderCredential(value: string) { return !value.trim() || /cyberark|ssh key reference|public key|ssh-rsa|ssh-ed25519|begin public key/i.test(value); }
+function isTPLinkSource(method: string) { return method === "TP-Link Web UI"; }
+function defaultWifiCommand(method: string) { return isTPLinkSource(method) ? "/#/home" : "iw dev [auto] link"; }
+function wifiCommandLabel(method: string, command: string) { return command || defaultWifiCommand(method); }
+function isPlaceholderCredential(value: string) { return !value.trim() || /cyberark|ssh key reference|tp-link password|public key|ssh-rsa|ssh-ed25519|begin public key/i.test(value); }
 function amrIsMoving(amr: AMR) {
   return amr.moving === true || ["RUNNING", "EXECUTING", "MOVING", "GOING"].includes((amr.taskState || "").toUpperCase());
 }
@@ -672,7 +675,7 @@ export default function AmrHealthApp() {
       host: saved?.host || "",
       username: saved?.username || "",
       secretRef: "",
-      command: saved?.command || "iw dev [auto] link"
+      command: saved?.command || defaultWifiCommand(saved?.method || current.method)
     }));
     setWifiFormError("");
     setWifiTest(null);
@@ -1263,8 +1266,8 @@ export default function AmrHealthApp() {
   async function testWifiSource(source?: WifiSource) {
     const selectedPlant = source?.plant || wifiForm.plant.trim() || selectedImportPlant;
     const payload: WifiSource = source
-      ? { ...source, secretRef: source.secretRef || (wifiForm.plant === source.plant ? wifiForm.secretRef.trim() : ""), command: source.command || "iw dev [auto] link" }
-      : { ...wifiForm, plant: selectedPlant, name: wifiForm.name.trim() || `${selectedPlant} RSSI source`, host: wifiForm.host.trim(), username: wifiForm.username.trim(), secretRef: wifiForm.secretRef.trim(), command: wifiForm.command.trim() || "iw dev [auto] link", savedAt: new Date().toISOString() };
+      ? { ...source, secretRef: source.secretRef || (wifiForm.plant === source.plant ? wifiForm.secretRef.trim() : ""), command: source.command || defaultWifiCommand(source.method) }
+      : { ...wifiForm, plant: selectedPlant, name: wifiForm.name.trim() || `${selectedPlant} RSSI source`, host: wifiForm.host.trim(), username: wifiForm.username.trim(), secretRef: wifiForm.secretRef.trim(), command: wifiForm.command.trim() || defaultWifiCommand(wifiForm.method), savedAt: new Date().toISOString() };
     setBusy("Testing RSSI");
     setWifiFormError("");
     setWifiTest(null);
@@ -1276,12 +1279,12 @@ export default function AmrHealthApp() {
       const result = await response.json() as WifiTestResult;
       const status = response.ok && result.ok ? "Available" : result.status === "timeout" || response.status >= 500 ? "Failed" : "Partial";
       setWifiTest({ ...result, ok: response.ok && result.ok });
-      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status, source: payload.method, command: "iw dev [auto] link", gap: result.message } : item) }));
+      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status, source: payload.method, command: wifiCommandLabel(payload.method, payload.command), gap: result.message } : item) }));
     } catch (error) {
       const timedOut = error instanceof DOMException && error.name === "AbortError";
-      const message = timedOut ? "SSH connection timed out after 10s" : `RSSI test failed: ${error instanceof Error ? error.message : String(error)}`;
+      const message = timedOut ? `${payload.method} connection timed out after 10s` : `RSSI test failed: ${error instanceof Error ? error.message : String(error)}`;
       setWifiTest({ ok: false, status: timedOut ? "timeout" : "failed", method: payload.method, host: payload.host, message });
-      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: "Failed", source: payload.method, command: "iw dev [auto] link", gap: message } : item) }));
+      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: "Failed", source: payload.method, command: wifiCommandLabel(payload.method, payload.command), gap: message } : item) }));
     } finally {
       window.clearTimeout(timeoutId);
       setBusy("");
@@ -1290,15 +1293,15 @@ export default function AmrHealthApp() {
   async function testAmrRssi() {
     const plant = wifiForm.plant.trim() || selectedImportPlant;
     const robots = state.amrs.filter((amr) => amr.plant === plant && amr.ip && amr.ip !== "unknown").map((amr) => ({ plant: amr.plant, name: amr.name, ip: amr.ip }));
-    const source: WifiSource = { ...wifiForm, plant, host: "", username: wifiForm.username.trim(), secretRef: wifiForm.secretRef.trim(), command: wifiForm.command.trim() || "iw dev [auto] link", name: wifiForm.name.trim() || `${plant} AMR RSSI`, savedAt: new Date().toISOString() };
+    const source: WifiSource = { ...wifiForm, plant, host: isTPLinkSource(wifiForm.method) ? wifiForm.host.trim() : "", username: wifiForm.username.trim(), secretRef: wifiForm.secretRef.trim(), command: wifiForm.command.trim() || defaultWifiCommand(wifiForm.method), name: wifiForm.name.trim() || `${plant} AMR RSSI`, savedAt: new Date().toISOString() };
     setWifiTest(null);
     setWifiDiscover(null);
     setWifiFormError("");
-    if (!source.username) {
+    if (!isTPLinkSource(source.method) && !source.username) {
       setWifiDiscover({ ok: false, message: "Username is required for AMR RSSI auto-discovery. Enter the approved read-only AMR SSH username, save, then test again.", results: [] });
       return;
     }
-    if (isPlaceholderCredential(source.secretRef)) {
+    if (!isTPLinkSource(source.method) && isPlaceholderCredential(source.secretRef)) {
       setWifiDiscover({ ok: false, message: "Credential Reference must be the private key path inside DRISHTI, for example /app/data/keys/<key_file>.", results: [] });
       return;
     }
@@ -1310,29 +1313,49 @@ export default function AmrHealthApp() {
       const result = await response.json() as WifiDiscoverResponse;
       const results = result.results || [];
       setWifiDiscover({ ...result, results });
+      const sourceLabel = isTPLinkSource(source.method) ? "TP-Link Web UI" : "AMR SSH Auto-Discovery";
       const realResults = new Map(results.filter((item) => item.ok && item.rssi !== undefined && item.quality && item.quality !== "Unknown").map((item) => [item.amr, item]));
+      const discoveredRows: DiscoveryAMR[] = results.filter((item) => item.ok && item.rssi !== undefined).map((item) => ({
+        plant: item.plant,
+        amr: item.amr,
+        rssi_dbm: item.rssi,
+        snr_db: item.snr_db,
+        ap_name: item.ap_name || item.host,
+        band: item.band || "not reported",
+        channel: item.channel || "not reported",
+        last_seen: new Date().toISOString(),
+        source: sourceLabel
+      }));
+      if (discoveredRows.length) {
+        setDiscoveryRows((current) => {
+          const byKey = new Map(current.map((row) => [`${row.plant}::${row.amr}`, row]));
+          discoveredRows.forEach((row) => byKey.set(`${row.plant}::${row.amr}`, row));
+          return Array.from(byKey.values());
+        });
+        setDiscoveryStatus(`Loaded ${discoveredRows.length} live RSSI row(s) from ${sourceLabel}.`);
+      }
       setState((current) => {
         const nextWifiPoints = current.wifiPoints.map((point) => {
           const match = realResults.get(point.amr);
-          return match && point.plant === match.plant ? { ...point, rssi: match.rssi!, quality: match.quality as WifiPoint["quality"], ap: `Robot ${match.host}`, ssid: ssidLabel(match.ssid), source: "AMR SSH Auto-Discovery", time: new Date().toISOString() } : point;
+          return match && point.plant === match.plant ? { ...point, rssi: match.rssi!, quality: match.quality as WifiPoint["quality"], ap: `Robot ${match.host}`, ssid: ssidLabel(match.ssid), source: sourceLabel, time: new Date().toISOString() } : point;
         });
         const nextAmrs = current.amrs.map((amr) => {
           const match = realResults.get(amr.name);
-          return match && amr.plant === match.plant ? { ...amr, rssi: match.rssi!, ap: `Robot ${match.host}`, ssid: ssidLabel(match.ssid), source: "AMR SSH Auto-Discovery" } : amr;
+          return match && amr.plant === match.plant ? { ...amr, rssi: match.rssi!, ap: `Robot ${match.host}`, ssid: ssidLabel(match.ssid), source: sourceLabel } : amr;
         });
         return {
           ...current,
           wifiPoints: nextWifiPoints,
           amrs: nextAmrs,
           confidenceSamples: mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(plant, nextAmrs, nextWifiPoints, current.sceneMaps[plant]?.md5)),
-          discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: result.ok ? "Available" : "Partial", source: "AMR SSH Auto-Discovery", command: "RDS basic_info.ip + SSH Wi-Fi command detection", gap: result.message } : item)
+          discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: result.ok ? "Available" : "Partial", source: sourceLabel, command: isTPLinkSource(source.method) ? "TP-Link Web UI status page" : "RDS basic_info.ip + SSH Wi-Fi command detection", gap: result.message } : item)
         };
       });
     } catch (error) {
       const timedOut = error instanceof DOMException && error.name === "AbortError";
-      const message = timedOut ? "SSH connection timed out after 10s" : `AMR RSSI auto-discovery failed: ${error instanceof Error ? error.message : String(error)}`;
+      const message = timedOut ? `${source.method} connection timed out after 10s` : `AMR RSSI auto-discovery failed: ${error instanceof Error ? error.message : String(error)}`;
       setWifiDiscover({ ok: false, message, results: [] });
-      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: "Failed", source: "AMR SSH Auto-Discovery", command: "RDS basic_info.ip + SSH Wi-Fi command detection", gap: message } : item) }));
+      setState((current) => ({ ...current, discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: "Failed", source: source.method, command: isTPLinkSource(source.method) ? "TP-Link Web UI status page" : "RDS basic_info.ip + SSH Wi-Fi command detection", gap: message } : item) }));
     } finally {
       window.clearTimeout(timeoutId);
       setBusy("");
@@ -1343,10 +1366,10 @@ export default function AmrHealthApp() {
     const plant = wifiForm.plant.trim() || selectedImportPlant;
     const host = wifiForm.host.trim();
     if (!host) {
-      setWifiFormError("Host or AMR IP is required to test SSH connectivity");
+      setWifiFormError(isTPLinkSource(wifiForm.method) ? "TP-Link URL, IP, or {ip} template is required" : "Host or AMR IP is required to test SSH connectivity");
       return;
     }
-    const payload: WifiSource = { ...wifiForm, plant, name: wifiForm.name.trim() || `${plant} RSSI source`, host, username: wifiForm.username.trim(), secretRef: "", command: wifiForm.command.trim() || "iw dev [auto] link", savedAt: new Date().toISOString() };
+    const payload: WifiSource = { ...wifiForm, plant, name: wifiForm.name.trim() || `${plant} RSSI source`, host, username: wifiForm.username.trim(), secretRef: "", command: wifiForm.command.trim() || defaultWifiCommand(wifiForm.method), savedAt: new Date().toISOString() };
     setWifiFormError("");
     setState((current) => ({
       ...current,
@@ -1372,17 +1395,17 @@ export default function AmrHealthApp() {
           <form className="form-grid" onSubmit={saveWifiSource}>
             <label className="field"><span>Plant</span><select value={wifiForm.plant} onChange={(e) => selectWifiPlant(e.target.value)}>{wifiPlantOptions.map((plant) => <option key={plant}>{plant}</option>)}</select></label>
             <label className="field"><span>Source Name</span><input value={wifiForm.name} onChange={(e) => setWifiForm({ ...wifiForm, name: e.target.value })} /></label>
-            <label className="field"><span>Method</span><select value={wifiForm.method} onChange={(e) => setWifiForm({ ...wifiForm, method: e.target.value as WifiSource["method"] })}><option>AMR SSH</option><option>Controller API</option><option>Manual Import</option></select></label>
-            <label className="field"><span>Host or API</span><input value={wifiForm.host} onChange={(e) => { setWifiForm({ ...wifiForm, host: e.target.value }); setWifiFormError(""); }} placeholder="one AMR IP or host for SSH test" />{wifiFormError && <small className="field-error">{wifiFormError}</small>}</label>
-            <label className="field"><span>Username</span><input value={wifiForm.username} onChange={(e) => setWifiForm({ ...wifiForm, username: e.target.value })} placeholder="read-only user" /></label>
-            <label className="field"><span>Credential Reference</span><input value={wifiForm.secretRef} onChange={(e) => setWifiForm({ ...wifiForm, secretRef: e.target.value })} placeholder="private key path, write-only" /></label>
-            <label className="field wide-field"><span>RSSI Command or Path</span><input value={wifiForm.command} onChange={(e) => setWifiForm({ ...wifiForm, command: e.target.value })} placeholder="iw dev [auto] link - interface detected automatically" /></label>
+            <label className="field"><span>Method</span><select value={wifiForm.method} onChange={(e) => { const method = e.target.value as WifiSource["method"]; setWifiForm({ ...wifiForm, method, command: defaultWifiCommand(method), secretRef: "" }); }}><option>AMR SSH</option><option>TP-Link Web UI</option><option>Controller API</option><option>Manual Import</option></select></label>
+            <label className="field"><span>{isTPLinkSource(wifiForm.method) ? "TP-Link URL / template" : "Host or API"}</span><input value={wifiForm.host} onChange={(e) => { setWifiForm({ ...wifiForm, host: e.target.value }); setWifiFormError(""); }} placeholder={isTPLinkSource(wifiForm.method) ? "http://10.x.x.x or http://{ip}" : "one AMR IP or host for SSH test"} />{wifiFormError && <small className="field-error">{wifiFormError}</small>}</label>
+            <label className="field"><span>Username</span><input value={wifiForm.username} onChange={(e) => setWifiForm({ ...wifiForm, username: e.target.value })} placeholder={isTPLinkSource(wifiForm.method) ? "TP-Link admin user" : "read-only user"} /></label>
+            <label className="field"><span>{isTPLinkSource(wifiForm.method) ? "TP-Link Password / Reference" : "Credential Reference"}</span><input type={isTPLinkSource(wifiForm.method) ? "password" : "text"} autoComplete="new-password" value={wifiForm.secretRef} onChange={(e) => setWifiForm({ ...wifiForm, secretRef: e.target.value })} placeholder={isTPLinkSource(wifiForm.method) ? "write-only password or CyberArk reference" : "private key path, write-only"} /></label>
+            <label className="field wide-field"><span>{isTPLinkSource(wifiForm.method) ? "TP-Link Status Path" : "RSSI Command or Path"}</span><input value={wifiForm.command} onChange={(e) => setWifiForm({ ...wifiForm, command: e.target.value })} placeholder={isTPLinkSource(wifiForm.method) ? "/#/home, /status.html, or leave default" : "iw dev [auto] link - interface detected automatically"} /></label>
             <button className="primary-action" type="submit">Save RSSI Source</button>
             <button className="ghost-action" type="button" onClick={() => void testWifiSource()} disabled={Boolean(busy)}>{busy === "Testing RSSI" ? <span className="spinner-label"><i></i>Testing...</span> : "Test One Host RSSI"}</button>
             <button className="ghost-action" type="button" onClick={() => void testAmrRssi()} disabled={Boolean(busy)}>{busy === "Testing AMR RSSI" ? <span className="spinner-label"><i></i>Testing...</span> : "Test RSSI on AMRs"}</button>
           </form>
-          {wifiTest && <div className={`wifi-test-result ${wifiTest.ok ? "ok" : "error"}`}><header>{badge(wifiTest.ok ? "Available" : "Partial")}<strong>{wifiTest.message}</strong></header>{wifiTest.rssi !== undefined && <span>RSSI {wifiTest.rssi} dBm - {wifiTest.quality} - SSID {ssidLabel(wifiTest.ssid)}</span>}{wifiTest.output && <pre>{wifiTest.output}</pre>}</div>}
-          {wifiDiscover && <div className={`wifi-test-result ${wifiDiscover.ok ? "ok" : "error"}`}><header>{badge(wifiDiscover.ok ? "Available" : "Partial")}<strong>{wifiDiscover.message}</strong></header><div className="wifi-result-list">{(wifiDiscover.results || []).map((item) => <article key={`${item.plant}-${item.amr}-${item.host}`} className={item.ok ? "ok" : "error"}><strong>{item.amr}</strong><span>{item.host} - {item.message}</span>{item.rssi !== undefined && <small>{item.rssi} dBm - {item.quality} - SSID {ssidLabel(item.ssid)} - {item.command}</small>}{item.output && <pre>{item.output}</pre>}</article>)}</div></div>}
+          {wifiTest && <div className={`wifi-test-result ${wifiTest.ok ? "ok" : "error"}`}><header>{badge(wifiTest.ok ? "Available" : "Partial")}<strong>{wifiTest.message}</strong></header>{wifiTest.rssi !== undefined && <span>RSSI {wifiTest.rssi} dBm - {wifiTest.quality} - SSID {ssidLabel(wifiTest.ssid)}{wifiTest.snr_db !== undefined ? ` - SNR ${wifiTest.snr_db} dB` : ""}{wifiTest.channel ? ` - Channel ${wifiTest.channel}` : ""}</span>}{wifiTest.output && <pre>{wifiTest.output}</pre>}</div>}
+          {wifiDiscover && <div className={`wifi-test-result ${wifiDiscover.ok ? "ok" : "error"}`}><header>{badge(wifiDiscover.ok ? "Available" : "Partial")}<strong>{wifiDiscover.message}</strong></header><div className="wifi-result-list">{(wifiDiscover.results || []).map((item) => <article key={`${item.plant}-${item.amr}-${item.host}`} className={item.ok ? "ok" : "error"}><strong>{item.amr}</strong><span>{item.host} - {item.message}</span>{item.rssi !== undefined && <small>{item.rssi} dBm - {item.quality} - SSID {ssidLabel(item.ssid)}{item.snr_db !== undefined ? ` - SNR ${item.snr_db} dB` : ""}{item.channel ? ` - Channel ${item.channel}` : ""} - {item.command}</small>}{item.output && <pre>{item.output}</pre>}</article>)}</div></div>}
           <div className="api-list source-list">{(state.wifiSources || []).map((source) => <article className={`api-card ${source.plant === wifiForm.plant ? "selected" : ""}`} key={`${source.plant}-${source.name}`}><header><strong>{source.plant}</strong><span>{badge(source.method)}</span></header><div className="api-links"><span>{source.name}</span><span>Host <code>{source.host || "not set"}</code></span><span>User <code>{source.username || "not set"}</code></span><span>Credential <code>write-only</code></span><span>Command <code>{source.command}</code></span>{source.host ? <button className="row-action" onClick={() => source.plant === wifiForm.plant ? void testWifiSource(source) : selectWifiPlant(source.plant)} disabled={Boolean(busy)}>{source.plant === wifiForm.plant ? "Test One Host RSSI" : "Select Plant"}</button> : <span className="host-required-pill">Host required</span>}</div></article>)}</div>
         </section>
         <section className="panel">

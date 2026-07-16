@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -23,12 +25,12 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/joho/godotenv"
 	"drishti-amr-health/internal/api"
 	"drishti-amr-health/internal/api/handlers"
 	"drishti-amr-health/internal/config"
 	"drishti-amr-health/internal/db"
 	"drishti-amr-health/internal/scheduler"
+	"github.com/joho/godotenv"
 )
 
 type APIConnection struct {
@@ -72,6 +74,10 @@ type WifiDiscoverResult struct {
 	RSSI    *int   `json:"rssi,omitempty"`
 	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
+	SNR     *int   `json:"snr_db,omitempty"`
+	APName  string `json:"ap_name,omitempty"`
+	Band    string `json:"band,omitempty"`
+	Channel string `json:"channel,omitempty"`
 }
 
 type WifiDiscoverResponse struct {
@@ -89,8 +95,11 @@ type WifiTestResult struct {
 	RSSI    *int   `json:"rssi,omitempty"`
 	SSID    string `json:"ssid,omitempty"`
 	Quality string `json:"quality,omitempty"`
+	SNR     *int   `json:"snr_db,omitempty"`
+	APName  string `json:"ap_name,omitempty"`
+	Band    string `json:"band,omitempty"`
+	Channel string `json:"channel,omitempty"`
 }
-
 type DiscoveryAMR struct {
 	Plant    string `json:"plant"`
 	AMR      string `json:"amr"`
@@ -1471,13 +1480,13 @@ func wifiDiscoverError(message string) WifiDiscoverResponse {
 }
 func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResponse, int) {
 	source := normalizeWifiSource(request.Source)
-	if source.Method != "AMR SSH" {
-		return wifiDiscoverError("Only AMR SSH auto-discovery is supported right now."), http.StatusBadRequest
+	if source.Method != "AMR SSH" && !isTPLinkMethod(source.Method) {
+		return wifiDiscoverError("Only AMR SSH and TP-Link Web UI auto-discovery are supported right now."), http.StatusBadRequest
 	}
-	if source.Username == "" {
+	if source.Method == "AMR SSH" && source.Username == "" {
 		return wifiDiscoverError("Username is required for AMR RSSI auto-discovery."), http.StatusBadRequest
 	}
-	if looksLikePublicKey(source.SecretRef) {
+	if source.Method == "AMR SSH" && looksLikePublicKey(source.SecretRef) {
 		return wifiDiscoverError("Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/<key_file>."), http.StatusBadRequest
 	}
 	if len(request.Robots) == 0 {
@@ -1493,7 +1502,12 @@ func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResp
 			results = append(results, WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: robot.IP, Message: "No robot IP from RDS basic_info.ip."})
 			continue
 		}
-		result := s.discoverRobotRSSI(source, robot)
+		var result WifiDiscoverResult
+		if isTPLinkMethod(source.Method) {
+			result = s.discoverRobotTPLinkRSSI(source, robot)
+		} else {
+			result = s.discoverRobotRSSI(source, robot)
+		}
 		if result.OK {
 			okCount++
 		}
@@ -1544,6 +1558,55 @@ func (s *Server) discoverRobotRSSI(source WifiSource, robot WifiRobot) WifiDisco
 	return result
 }
 
+func (s *Server) discoverRobotTPLinkRSSI(source WifiSource, robot WifiRobot) WifiDiscoverResult {
+	host := strings.TrimSpace(source.Host)
+	if host == "" {
+		host = robot.IP
+	} else {
+		host = strings.ReplaceAll(host, "{ip}", robot.IP)
+		host = strings.ReplaceAll(host, "{amr}", robot.Name)
+	}
+	result := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: host, Command: source.Command}
+	if host == "" || host == "unknown" {
+		result.Status = "failed"
+		result.Message = "No TP-Link URL/IP available for this AMR. Enter a TP-Link URL or use {ip} template."
+		return result
+	}
+	tpSource := source
+	tpSource.Host = host
+	reading, err := s.fetchTPLinkReading(tpSource)
+	result.Output = reading.Output
+	result.RSSI = reading.RSSI
+	result.SSID = reading.SSID
+	result.SNR = reading.SNR
+	result.APName = reading.APName
+	result.Band = reading.Band
+	result.Channel = reading.Channel
+	if err != nil {
+		result.Status = "failed"
+		result.Message = fmt.Sprintf("TP-Link RSSI read failed: %v", err)
+		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
+			result.Status = "partial"
+			result.Message = "TP-Link page partially parsed, but RSSI was incomplete."
+		}
+		return result
+	}
+	if reading.RSSI == nil {
+		result.Status = "partial"
+		result.Message = "TP-Link page loaded, but no RSSI value was found."
+		result.Quality = "Unknown"
+		return result
+	}
+	result.OK = true
+	result.Status = "available"
+	result.Quality = rssiQuality(*reading.RSSI)
+	if result.SSID != "" {
+		result.Message = fmt.Sprintf("TP-Link RSSI detected: %d dBm (%s) on SSID %s.", *reading.RSSI, result.Quality, result.SSID)
+	} else {
+		result.Message = fmt.Sprintf("TP-Link RSSI detected: %d dBm (%s).", *reading.RSSI, result.Quality)
+	}
+	return result
+}
 func wifiAutoRSSICommand() string {
 	return `sh -lc 'iw_out=$(iw dev 2>&1); iface=$(printf "%s\n" "$iw_out" | grep Interface | awk '\''{print $2}'\'' | head -n 1); if [ -n "$iface" ]; then iw dev "$iface" link; else iwconfig_out=$(iwconfig 2>&1); signal=$(printf "%s\n" "$iwconfig_out" | grep -i "essid\|signal"); if [ -n "$signal" ]; then printf "%s\n" "$signal"; else printf "%s\n%s\nNo WiFi interface found on this AMR\n" "$iw_out" "$iwconfig_out"; exit 19; fi; fi'`
 }
@@ -1603,12 +1666,312 @@ func trimOutput(output string) string {
 	}
 	return cleanOutput
 }
+
+type tpLinkReading struct {
+	RSSI    *int
+	SSID    string
+	SNR     *int
+	APName  string
+	Band    string
+	Channel string
+	Output  string
+}
+
+func isTPLinkMethod(method string) bool {
+	return strings.EqualFold(strings.TrimSpace(method), "TP-Link Web UI")
+}
+
+func normalizeHTTPURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("TP-Link host or URL is required")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid TP-Link URL %q", raw)
+	}
+	return parsed, nil
+}
+
+func tpLinkCandidateURLs(base *url.URL, command string) []string {
+	command = strings.TrimSpace(command)
+	if command == "" || strings.Contains(strings.ToLower(command), "iw dev") {
+		command = "/"
+	}
+	candidates := []string{}
+	appendURL := func(path string) {
+		if path == "" {
+			return
+		}
+		if strings.Contains(path, "://") {
+			if !containsString(candidates, path) {
+				candidates = append(candidates, path)
+			}
+			return
+		}
+		next := *base
+		pathPart, rawQuery, _ := strings.Cut(path, "?")
+		next.Path = normalizePath(pathPart, "/")
+		next.RawQuery = rawQuery
+		next.Fragment = ""
+		candidate := next.String()
+		if !containsString(candidates, candidate) {
+			candidates = append(candidates, candidate)
+		}
+	}
+	appendURL(command)
+	appendURL(base.Path)
+	appendURL("/")
+	appendURL("/status.html")
+	appendURL("/userRpm/StatusRpm.htm")
+	appendURL("/data/status.json")
+	appendURL("/cgi-bin/luci/;stok=/admin/status?form=all")
+	appendURL("/cgi-bin/luci/;stok=/admin/status?form=wireless")
+	return candidates
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
+	base, err := normalizeHTTPURL(source.Host)
+	if err != nil {
+		return tpLinkReading{}, err
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: 10 * time.Second, Jar: jar}
+	username := strings.TrimSpace(source.Username)
+	password := strings.TrimSpace(source.SecretRef)
+	if username != "" && password != "" && !isPlaceholderCredential(password) {
+		_ = tpLinkLoginAttempts(client, base, username, password)
+	}
+	var lastOutput string
+	var lastStatus string
+	for _, target := range tpLinkCandidateURLs(base, source.Command) {
+		body, status, err := tpLinkGet(client, target, username, password)
+		if err != nil {
+			lastStatus = err.Error()
+			continue
+		}
+		lastStatus = status
+		clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
+		lastOutput = clean
+		reading := parseTPLinkReading(clean)
+		reading.Output = clean
+		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
+			return reading, nil
+		}
+	}
+	if lastOutput != "" {
+		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but no RSSI/SNR fields were found")
+	}
+	if lastStatus == "" {
+		lastStatus = "no TP-Link status page responded"
+	}
+	return tpLinkReading{}, errors.New(lastStatus)
+}
+
+func tpLinkLoginAttempts(client *http.Client, base *url.URL, username, password string) error {
+	loginPaths := []string{"/cgi-bin/luci/", "/cgi-bin/luci/;stok=/login?form=login", "/login", "/"}
+	var lastErr error
+	for _, path := range loginPaths {
+		target := *base
+		pathPart, rawQuery, _ := strings.Cut(path, "?")
+		target.Path = normalizePath(pathPart, "/")
+		target.RawQuery = rawQuery
+		form := url.Values{}
+		form.Set("username", username)
+		form.Set("password", password)
+		req, err := http.NewRequest(http.MethodPost, target.String(), strings.NewReader(form.Encode()))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.SetBasicAuth(username, password)
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			return nil
+		}
+		lastErr = fmt.Errorf("login returned %s", resp.Status)
+	}
+	return lastErr
+}
+
+func tpLinkGet(client *http.Client, target, username, password string) (string, string, error) {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
+	if username != "" && password != "" && !isPlaceholderCredential(password) {
+		req.SetBasicAuth(username, password)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return "", resp.Status, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return string(body), resp.Status, fmt.Errorf("TP-Link returned %s", resp.Status)
+	}
+	return string(body), resp.Status, nil
+}
+
+func normalizeTPLinkText(raw string) string {
+	text := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`).ReplaceAllString(raw, "\n")
+	text = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`).ReplaceAllString(text, "\n")
+	text = regexp.MustCompile(`(?i)<br\s*/?>|</tr>|</div>|</p>|</li>|</td>|</span>`).ReplaceAllString(text, "\n")
+	text = regexp.MustCompile(`(?s)<[^>]+>`).ReplaceAllString(text, " ")
+	text = html.UnescapeString(text)
+	text = strings.ReplaceAll(text, "\u003c", "<")
+	text = regexp.MustCompile(`[\t ]+`).ReplaceAllString(text, " ")
+	text = regexp.MustCompile(`\n\s+`).ReplaceAllString(text, "\n")
+	text = regexp.MustCompile(`\n{3,}`).ReplaceAllString(text, "\n\n")
+	return strings.TrimSpace(text)
+}
+
+func sanitizeTPLinkOutput(output, secret string) string {
+	secret = strings.TrimSpace(secret)
+	lines := []string{}
+	for _, line := range strings.Split(output, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "password") || strings.Contains(lower, "passwd") || strings.Contains(lower, "psk") || strings.Contains(lower, "key") {
+			continue
+		}
+		if secret != "" && !isPlaceholderCredential(secret) {
+			line = strings.ReplaceAll(line, secret, "[credential]")
+		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return trimOutput(strings.Join(lines, "\n"))
+}
+
+func parseTPLinkReading(output string) tpLinkReading {
+	reading := tpLinkReading{}
+	reading.RSSI = parseRSSI(output)
+	reading.SSID = parseSSID(output)
+	reading.SNR = parseFirstInt(output, []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bSNR\b[^-\d]*(\d+)\s*dB`),
+		regexp.MustCompile(`(?i)\bsnr_db\b[^-\d]*(\d+)`),
+	})
+	reading.APName = parseLabelValue(output, []string{"BSSID", "AP MAC", "AP", "ap_name"})
+	reading.Channel = parseLabelValue(output, []string{"Channel", "channel"})
+	reading.Band = parseBand(output)
+	return reading
+}
+
+func parseFirstInt(output string, patterns []*regexp.Regexp) *int {
+	for _, pattern := range patterns {
+		match := pattern.FindStringSubmatch(output)
+		if len(match) == 2 {
+			value, err := strconv.Atoi(match[1])
+			if err == nil {
+				return &value
+			}
+		}
+	}
+	return nil
+}
+
+func parseLabelValue(output string, labels []string) string {
+	for _, label := range labels {
+		patterns := []*regexp.Regexp{
+			regexp.MustCompile(`(?im)^\s*` + regexp.QuoteMeta(label) + `\s*[:=]?\s*(.+?)\s*$`),
+			regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(label) + `"\s*:\s*"?([^",}\n]+)`),
+		}
+		for _, pattern := range patterns {
+			match := pattern.FindStringSubmatch(output)
+			if len(match) == 2 {
+				value := strings.TrimSpace(match[1])
+				value = strings.Trim(value, `"'`)
+				if value != "" && !strings.Contains(strings.ToLower(value), "not reported") {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func parseBand(output string) string {
+	if value := parseLabelValue(output, []string{"Band", "band"}); value != "" {
+		return value
+	}
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "5g") || strings.Contains(lower, "5 ghz") {
+		return "5G"
+	}
+	if strings.Contains(lower, "2.4g") || strings.Contains(lower, "2.4 ghz") || strings.Contains(lower, "802.11b/g/n") {
+		return "2.4G"
+	}
+	return ""
+}
 func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	source = normalizeWifiSource(source)
 	result := WifiTestResult{Method: source.Method, Host: source.Host}
+	if isTPLinkMethod(source.Method) {
+		if source.Host == "" {
+			result.Status = "failed"
+			result.Message = "TP-Link URL/IP is required for Web UI RSSI testing."
+			return result, http.StatusBadRequest
+		}
+		reading, err := s.fetchTPLinkReading(source)
+		result.Output = reading.Output
+		result.RSSI = reading.RSSI
+		result.SSID = reading.SSID
+		result.SNR = reading.SNR
+		result.APName = reading.APName
+		result.Band = reading.Band
+		result.Channel = reading.Channel
+		if err != nil {
+			result.Status = "failed"
+			result.Message = fmt.Sprintf("TP-Link RSSI test failed: %v", err)
+			return result, http.StatusBadGateway
+		}
+		if reading.RSSI == nil {
+			result.OK = true
+			result.Status = "partial"
+			result.Message = "TP-Link page loaded, but no RSSI value was found."
+			result.Quality = "Unknown"
+			return result, http.StatusOK
+		}
+		result.OK = true
+		result.Status = "available"
+		result.Quality = rssiQuality(*reading.RSSI)
+		if result.SSID != "" {
+			result.Message = fmt.Sprintf("TP-Link RSSI test succeeded. Signal %d dBm (%s) on SSID %s.", *reading.RSSI, result.Quality, result.SSID)
+		} else {
+			result.Message = fmt.Sprintf("TP-Link RSSI test succeeded. Signal %d dBm (%s).", *reading.RSSI, result.Quality)
+		}
+		return result, http.StatusOK
+	}
 	if source.Method != "AMR SSH" {
 		result.Status = "failed"
-		result.Message = "Only AMR SSH can be tested right now. Controller API and manual import need a parser endpoint first."
+		result.Message = "Only AMR SSH and TP-Link Web UI can be tested right now."
 		return result, http.StatusBadRequest
 	}
 	if source.Host == "" || source.Username == "" {
@@ -1660,6 +2023,11 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	}
 	return result, http.StatusOK
 }
+
+func isPlaceholderCredential(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value == "" || strings.Contains(value, "cyberark") || strings.Contains(value, "ssh key reference") || strings.Contains(value, "tp-link password")
+}
 func looksLikePublicKey(value string) bool {
 	value = strings.TrimSpace(value)
 	return strings.HasPrefix(value, "ssh-rsa ") || strings.HasPrefix(value, "ssh-ed25519 ") || strings.Contains(value, "BEGIN PUBLIC KEY")
@@ -1706,7 +2074,20 @@ func cleanSSID(value string) string {
 	}
 	return value
 }
+
 func parseRSSI(output string) *int {
+	dualPattern := regexp.MustCompile(`(?i)\bRSSI\b[^-\d]*(-?\d+)\s*/\s*(-?\d+)\s*dBm`)
+	if match := dualPattern.FindStringSubmatch(output); len(match) == 3 {
+		first, firstErr := strconv.Atoi(match[1])
+		second, secondErr := strconv.Atoi(match[2])
+		if firstErr == nil && secondErr == nil {
+			value := first
+			if second < value {
+				value = second
+			}
+			return &value
+		}
+	}
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)signal:\s*(-?\d+)\s*dBm`),
 		regexp.MustCompile(`(?i)rssi[^-\d]*(-?\d+)`),
@@ -1745,6 +2126,7 @@ func rssiQuality(rssi int) string {
 		return "Critical"
 	}
 }
+
 func (s *Server) loadConnections() ([]APIConnection, error) {
 	data, err := os.ReadFile(s.configPath)
 	if errors.Is(err, os.ErrNotExist) {
