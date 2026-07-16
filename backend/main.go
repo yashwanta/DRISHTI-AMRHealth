@@ -1887,10 +1887,10 @@ func tpLinkDSLogin(client *http.Client, base *url.URL, username, password string
 	body, _, err := tpLinkDSPost(client, base, "null", payload, username, password)
 	clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
 	if err != nil {
-		return "", clean, err
+		return "", clean, tpLinkDSError(body, err)
 	}
 	if code, ok := tpLinkErrorCode(body); ok && code != 0 {
-		return "", clean, fmt.Errorf("TP-Link login returned error_code %d", code)
+		return "", clean, tpLinkDSError(body, fmt.Errorf("TP-Link login returned error_code %d", code))
 	}
 	stok := findTPLinkToken(body)
 	if stok == "" {
@@ -1899,6 +1899,32 @@ func tpLinkDSLogin(client *http.Client, base *url.URL, username, password string
 	return stok, clean, nil
 }
 
+func tpLinkDSError(body string, fallback error) error {
+	code, ok := tpLinkErrorCode(body)
+	if !ok {
+		return fallback
+	}
+	if code == -40401 {
+		waitMessage := ""
+		if seconds, ok := tpLinkNumericDataField(body, "time"); ok && seconds > 0 {
+			waitMessage = fmt.Sprintf(" Wait about %d seconds before retrying.", seconds)
+		}
+		return fmt.Errorf("TP-Link rejected the login (error_code -40401). Check the TP-Link admin username/password; repeated failed attempts can temporarily lock login.%s", waitMessage)
+	}
+	return fallback
+}
+
+func tpLinkNumericDataField(body string, field string) (int, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return 0, false
+	}
+	data, ok := payload["data"]
+	if !ok {
+		return 0, false
+	}
+	return findNumericField(data, field)
+}
 func tpLinkDSStatusPayloads() []map[string]any {
 	return []map[string]any{
 		{
