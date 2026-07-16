@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -180,11 +181,13 @@ type BadZoneExportRow struct {
 }
 
 type Server struct {
-	configPath string
-	staticDir  string
-	client     *http.Client
-	db         *sql.DB
-	ackPath    string
+	configPath     string
+	staticDir      string
+	client         *http.Client
+	db             *sql.DB
+	ackPath        string
+	tpLinkMu       sync.Mutex
+	tpLinkLockouts map[string]time.Time
 }
 
 func main() {
@@ -1480,8 +1483,11 @@ func wifiDiscoverError(message string) WifiDiscoverResponse {
 }
 func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResponse, int) {
 	source := normalizeWifiSource(request.Source)
-	if source.Method != "AMR SSH" && !isTPLinkMethod(source.Method) {
-		return wifiDiscoverError("Only AMR SSH and TP-Link Web UI auto-discovery are supported right now."), http.StatusBadRequest
+	if source.Method != "AMR SSH" && !isTPLinkMethod(source.Method) && !isSNMPMethod(source.Method) {
+		return wifiDiscoverError("Only AMR SSH, TP-Link Web UI, and SNMP RSSI sources are supported right now."), http.StatusBadRequest
+	}
+	if isSNMPMethod(source.Method) {
+		return wifiDiscoverError("SNMP telemetry is configured as an alternative RSSI method, but live SNMP polling is not enabled yet for AMR auto-discovery."), http.StatusOK
 	}
 	if source.Method == "AMR SSH" && source.Username == "" {
 		return wifiDiscoverError("Username is required for AMR RSSI auto-discovery."), http.StatusBadRequest
@@ -1585,6 +1591,11 @@ func (s *Server) discoverRobotTPLinkRSSI(source WifiSource, robot WifiRobot) Wif
 	if err != nil {
 		result.Status = "failed"
 		result.Message = fmt.Sprintf("TP-Link RSSI read failed: %v", err)
+		var tpErr *tpLinkIntegrationError
+		if errors.As(err, &tpErr) {
+			result.Status = tpErr.Status
+			result.Message = tpErr.Message
+		}
 		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
 			result.Status = "partial"
 			result.Message = "TP-Link page partially parsed, but RSSI was incomplete."
@@ -1681,6 +1692,10 @@ func isTPLinkMethod(method string) bool {
 	return strings.EqualFold(strings.TrimSpace(method), "TP-Link Web UI")
 }
 
+func isSNMPMethod(method string) bool {
+	return strings.EqualFold(strings.TrimSpace(method), "SNMP")
+}
+
 func normalizeHTTPURL(raw string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1756,6 +1771,19 @@ func containsString(values []string, needle string) bool {
 	return false
 }
 
+type tpLinkIntegrationError struct {
+	Status            string
+	Message           string
+	RetryAfterSeconds int
+}
+
+func (e *tpLinkIntegrationError) Error() string {
+	if e == nil || strings.TrimSpace(e.Message) == "" {
+		return "TP-Link RSSI integration failed"
+	}
+	return e.Message
+}
+
 func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	base, err := normalizeHTTPURL(source.Host)
 	if err != nil {
@@ -1763,7 +1791,7 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	}
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: 10 * time.Second,
 		Jar:     jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -1771,76 +1799,105 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	}
 	username := strings.TrimSpace(source.Username)
 	password := strings.TrimSpace(source.SecretRef)
-	var dsErr error
-	var dsOutput string
-	if username != "" && password != "" && !isPlaceholderCredential(password) {
-		if reading, err := tpLinkDSReading(client, base, username, password); err == nil {
-			return reading, nil
-		} else {
-			dsErr = err
-			dsOutput = reading.Output
+	if username == "" || password == "" || isPlaceholderCredential(password) {
+		output, reachErr := tpLinkReachabilityCheck(client, base, password)
+		if reachErr != nil {
+			return tpLinkReading{Output: output}, &tpLinkIntegrationError{Status: "connection_failed", Message: fmt.Sprintf("Device connection failed: %v", reachErr)}
 		}
-		_ = tpLinkLoginAttempts(client, base, username, password)
+		return tpLinkReading{Output: output}, &tpLinkIntegrationError{Status: "device_reachable", Message: "Device reachable; TP-Link username and write-only password are required before RSSI telemetry can be read."}
 	}
-	var lastOutput string
-	var lastStatus string
-	candidates := tpLinkCandidateURLs(base, source.Command)
-	deadline := time.Now().Add(9 * time.Second)
-	for index := 0; index < len(candidates); index++ {
-		if time.Now().After(deadline) {
-			lastStatus = "TP-Link endpoint scan timed out before RSSI/SNR data was found. Open DevTools Network on the TP-Link page and copy the JSON request that contains RSSI/SNR."
-			break
-		}
-		target := candidates[index]
-		body, status, err := tpLinkGet(client, target, username, password)
-		if err != nil {
-			lastStatus = err.Error()
-			continue
-		}
-		lastStatus = status
-		clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
-		lastOutput = clean
-		reading := parseTPLinkReading(clean)
-		reading.Output = clean
-		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
-			return reading, nil
-		}
-		for _, discovered := range tpLinkDiscoveredURLs(base, target, body) {
-			if !containsString(candidates, discovered) {
-				candidates = append(candidates, discovered)
-			}
-		}
-		if isTPLinkGuidePage(body) {
-			lastStatus = "TP-Link returned the tplogin.cn guide page, not the device status page. Use the AMR TP-Link IP URL only, enter the TP-Link password, then retry."
-		} else if isTPLinkSpaShell(body) {
-			lastStatus = "TP-Link Web UI shell loaded, but protected RSSI tables require the TP-Link password. Enter the router password/reference in the write-only field, then retry."
-		}
+
+	lockoutKey := s.tpLinkLockoutKey(base, username)
+	if remaining := s.tpLinkLockoutRemaining(lockoutKey); remaining > 0 {
+		seconds := durationSeconds(remaining)
+		return tpLinkReading{}, &tpLinkIntegrationError{Status: "auth_locked", RetryAfterSeconds: seconds, Message: fmt.Sprintf("TP-Link login is temporarily locked. Retry after about %d seconds.", seconds)}
 	}
-	if lastOutput != "" {
-		if lastStatus != "" {
-			lowerStatus := strings.ToLower(lastStatus)
-			if strings.Contains(lowerStatus, "tplogin.cn") || strings.Contains(lowerStatus, "web ui shell") {
-				return tpLinkReading{Output: lastOutput}, errors.New(lastStatus)
-			}
-		}
-		if password == "" || isPlaceholderCredential(password) {
-			return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but protected RSSI/SNR tables require the TP-Link password/reference in the write-only field")
-		}
-		if dsErr != nil {
-			output := lastOutput
-			if dsOutput != "" {
-				output = dsOutput
-			}
-			return tpLinkReading{Output: output}, fmt.Errorf("TP-Link ds API did not return RSSI/SNR: %w", dsErr)
-		}
-		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link page loaded, but no RSSI/SNR fields were found")
+
+	reading, err := tpLinkDSReading(client, base, username, password)
+	if err == nil {
+		return reading, nil
 	}
-	if lastStatus == "" {
-		lastStatus = "no TP-Link status page responded"
+	var tpErr *tpLinkIntegrationError
+	if errors.As(err, &tpErr) {
+		if tpErr.Status == "auth_locked" && tpErr.RetryAfterSeconds > 0 {
+			s.rememberTPLinkLockout(lockoutKey, time.Duration(tpErr.RetryAfterSeconds)*time.Second)
+		}
+		return reading, tpErr
 	}
-	return tpLinkReading{}, errors.New(lastStatus)
+	return reading, &tpLinkIntegrationError{Status: "failed", Message: err.Error()}
 }
 
+func durationSeconds(value time.Duration) int {
+	if value <= 0 {
+		return 0
+	}
+	return int((value + time.Second - time.Nanosecond) / time.Second)
+}
+
+func (s *Server) tpLinkLockoutKey(base *url.URL, username string) string {
+	return strings.ToLower(strings.TrimSpace(base.Scheme) + "://" + strings.TrimSpace(base.Host) + "|" + strings.TrimSpace(username))
+}
+
+func (s *Server) tpLinkLockoutRemaining(key string) time.Duration {
+	if key == "" {
+		return 0
+	}
+	s.tpLinkMu.Lock()
+	defer s.tpLinkMu.Unlock()
+	if s.tpLinkLockouts == nil {
+		return 0
+	}
+	until, ok := s.tpLinkLockouts[key]
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(until)
+	if remaining <= 0 {
+		delete(s.tpLinkLockouts, key)
+		return 0
+	}
+	return remaining
+}
+
+func (s *Server) rememberTPLinkLockout(key string, duration time.Duration) {
+	if key == "" || duration <= 0 {
+		return
+	}
+	s.tpLinkMu.Lock()
+	defer s.tpLinkMu.Unlock()
+	if s.tpLinkLockouts == nil {
+		s.tpLinkLockouts = map[string]time.Time{}
+	}
+	s.tpLinkLockouts[key] = time.Now().Add(duration)
+}
+
+func tpLinkReachabilityCheck(client *http.Client, base *url.URL, secret string) (string, error) {
+	target := *base
+	target.Path = normalizePath("/", "/")
+	target.RawQuery = ""
+	target.Fragment = ""
+	req, err := http.NewRequest(http.MethodGet, target.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("tplink rssi path=%q http_status=%q error_code=%s token=%t cookie=%t response_type=%q", "/", "transport_error", "none", false, false, "none")
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if readErr != nil {
+		return "", readErr
+	}
+	output := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(string(body))), secret)
+	log.Printf("tplink rssi path=%q http_status=%q error_code=%s token=%t cookie=%t response_type=%q", "/", resp.Status, "none", false, tpLinkJarHasCookies(client, base), tpLinkResponseType(resp.Header.Get("Content-Type"), string(body)))
+	if resp.StatusCode >= 500 {
+		return output, fmt.Errorf("TP-Link returned %s", resp.Status)
+	}
+	return output, nil
+}
 func tpLinkDSReading(client *http.Client, base *url.URL, username, password string) (tpLinkReading, error) {
 	stok, loginOutput, err := tpLinkDSLogin(client, base, username, password)
 	if err != nil {
@@ -1850,32 +1907,44 @@ func tpLinkDSReading(client *http.Client, base *url.URL, username, password stri
 	var lastStatus string
 	for _, payload := range tpLinkDSStatusPayloads() {
 		body, status, err := tpLinkDSPost(client, base, stok, payload, username, password)
+		clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
+		if clean != "" {
+			lastOutput = clean
+		}
 		if err != nil {
+			var tpErr *tpLinkIntegrationError
+			if errors.As(tpLinkDSError(body, err), &tpErr) {
+				if tpErr.Status == "auth_locked" || tpErr.Status == "auth_failed" {
+					return tpLinkReading{Output: clean}, tpErr
+				}
+			}
 			lastStatus = err.Error()
 			continue
 		}
-		clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
-		lastOutput = clean
 		if code, ok := tpLinkErrorCode(body); ok && code != 0 {
-			lastStatus = fmt.Sprintf("TP-Link ds status request returned error_code %d", code)
+			tpErr := tpLinkDSError(body, fmt.Errorf("TP-Link ds status request returned error_code %d", code))
+			var integrationErr *tpLinkIntegrationError
+			if errors.As(tpErr, &integrationErr) {
+				return tpLinkReading{Output: clean}, integrationErr
+			}
+			lastStatus = tpErr.Error()
 			continue
 		}
 		reading := parseTPLinkReading(clean)
 		reading.Output = clean
-		if reading.RSSI != nil || reading.SNR != nil || reading.SSID != "" {
+		if reading.RSSI != nil || reading.SNR != nil {
 			return reading, nil
 		}
 		lastStatus = status
 	}
 	if lastOutput != "" {
-		return tpLinkReading{Output: lastOutput}, errors.New("TP-Link ds status responded, but no RSSI/SNR fields were found")
+		return tpLinkReading{Output: lastOutput}, &tpLinkIntegrationError{Status: "telemetry_unavailable", Message: "Authenticated but RSSI endpoint unavailable: TP-Link ds status responded, but no RSSI/SNR fields were found."}
 	}
 	if lastStatus == "" {
 		lastStatus = "TP-Link ds status request did not return Wi-Fi telemetry"
 	}
-	return tpLinkReading{}, errors.New(lastStatus)
+	return tpLinkReading{}, &tpLinkIntegrationError{Status: "telemetry_unavailable", Message: "Authenticated but RSSI endpoint unavailable: " + lastStatus}
 }
-
 func tpLinkDSLogin(client *http.Client, base *url.URL, username, password string) (string, string, error) {
 	payload := map[string]any{
 		"method": "do",
@@ -1905,15 +1974,25 @@ func tpLinkDSError(body string, fallback error) error {
 		return fallback
 	}
 	if code == -40401 {
-		waitMessage := ""
-		if seconds, ok := tpLinkNumericDataField(body, "time"); ok && seconds > 0 {
-			waitMessage = fmt.Sprintf(" Wait about %d seconds before retrying.", seconds)
+		seconds := 0
+		if value, ok := tpLinkNumericDataField(body, "time"); ok && value > 0 {
+			seconds = value
+		} else if value, ok := tpLinkNumericDataField(body, "max_time"); ok && value > 0 {
+			seconds = value
 		}
-		return fmt.Errorf("TP-Link rejected the backend login (error_code -40401). The browser TP-Link session is separate from DRISHTI; enter the same TP-Link admin username/password in DRISHTI. Repeated failed attempts can temporarily lock login.%s", waitMessage)
+		message := "TP-Link authentication failed (error_code -40401). The browser TP-Link session is separate from DRISHTI; enter the same TP-Link admin username/password in DRISHTI."
+		status := "auth_failed"
+		if seconds > 0 {
+			status = "auth_locked"
+			message = fmt.Sprintf("TP-Link authentication is temporarily locked (error_code -40401). Retry after about %d seconds; DRISHTI will not attempt another login until then.", seconds)
+		}
+		return &tpLinkIntegrationError{Status: status, Message: message, RetryAfterSeconds: seconds}
+	}
+	if code == -40101 || code == -40100 || code == -40301 {
+		return &tpLinkIntegrationError{Status: "auth_failed", Message: fmt.Sprintf("TP-Link session was rejected or expired before RSSI telemetry was available (error_code %d).", code)}
 	}
 	return fallback
 }
-
 func tpLinkNumericDataField(body string, field string) (int, bool) {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
@@ -1986,6 +2065,7 @@ func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, 
 	req.Header.Set("Referer", strings.TrimRight(origin.String(), "/")+"/")
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("tplink rssi path=%q http_status=%q error_code=%s token=%t cookie=%t response_type=%q", tpLinkSanitizedPath(target.Path), "transport_error", "none", false, tpLinkJarHasCookies(client, base), "none")
 		return "", "", err
 	}
 	defer resp.Body.Close()
@@ -1993,12 +2073,63 @@ func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, 
 	if readErr != nil {
 		return "", resp.Status, readErr
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return string(body), resp.Status, fmt.Errorf("TP-Link ds returned %s", resp.Status)
+	bodyText := string(body)
+	codeText := "none"
+	if code, ok := tpLinkErrorCode(bodyText); ok {
+		codeText = strconv.Itoa(code)
 	}
-	return string(body), resp.Status, nil
+	tokenReceived := findTPLinkToken(bodyText) != ""
+	cookieReceived := tpLinkJarHasCookies(client, base)
+	responseType := tpLinkResponseType(resp.Header.Get("Content-Type"), bodyText)
+	log.Printf("tplink rssi path=%q http_status=%q error_code=%s token=%t cookie=%t response_type=%q", tpLinkSanitizedPath(target.Path), resp.Status, codeText, tokenReceived, cookieReceived, responseType)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return bodyText, resp.Status, fmt.Errorf("TP-Link ds returned %s", resp.Status)
+	}
+	return bodyText, resp.Status, nil
 }
 
+func tpLinkSanitizedPath(path string) string {
+	if strings.HasPrefix(path, "/stok=null/") || path == "/stok=null/ds" {
+		return "/stok=null/ds"
+	}
+	if strings.HasPrefix(path, "/stok=") {
+		return "/stok=[session]/ds"
+	}
+	return path
+}
+
+func tpLinkJarHasCookies(client *http.Client, base *url.URL) bool {
+	if client == nil || client.Jar == nil || base == nil {
+		return false
+	}
+	origin := *base
+	origin.Path = "/"
+	origin.RawQuery = ""
+	origin.Fragment = ""
+	return len(client.Jar.Cookies(&origin)) > 0
+}
+
+func tpLinkResponseType(contentType string, body string) string {
+	trimmed := strings.TrimSpace(body)
+	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		return "json"
+	}
+	lowerContent := strings.ToLower(contentType)
+	lowerBody := strings.ToLower(trimmed)
+	if strings.Contains(lowerContent, "html") || strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype") {
+		return "html"
+	}
+	if strings.Contains(lowerContent, "json") {
+		return "json"
+	}
+	if strings.Contains(lowerContent, "text") {
+		return "text"
+	}
+	if lowerContent != "" {
+		return lowerContent
+	}
+	return "unknown"
+}
 func tpLinkErrorCode(body string) (int, bool) {
 	var payload any
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
@@ -2310,7 +2441,19 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 		if err != nil {
 			result.Status = "failed"
 			result.Message = fmt.Sprintf("TP-Link RSSI test failed: %v", err)
-			return result, http.StatusBadGateway
+			statusCode := http.StatusBadGateway
+			var tpErr *tpLinkIntegrationError
+			if errors.As(err, &tpErr) {
+				result.Status = tpErr.Status
+				result.Message = tpErr.Message
+				switch tpErr.Status {
+				case "device_reachable", "telemetry_unavailable":
+					statusCode = http.StatusOK
+				case "auth_failed", "auth_locked":
+					statusCode = http.StatusUnauthorized
+				}
+			}
+			return result, statusCode
 		}
 		if reading.RSSI == nil {
 			result.OK = true
@@ -2329,9 +2472,19 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 		}
 		return result, http.StatusOK
 	}
+	if isSNMPMethod(source.Method) {
+		if source.Host == "" {
+			result.Status = "failed"
+			result.Message = "SNMP host or controller endpoint is required."
+			return result, http.StatusBadRequest
+		}
+		result.Status = "telemetry_unavailable"
+		result.Message = "SNMP is available as an alternative RSSI source type, but live SNMP polling is not enabled yet. Use TP-Link Web UI or AMR SSH until SNMP OIDs are configured."
+		return result, http.StatusOK
+	}
 	if source.Method != "AMR SSH" {
 		result.Status = "failed"
-		result.Message = "Only AMR SSH and TP-Link Web UI can be tested right now."
+		result.Message = "Only AMR SSH, TP-Link Web UI, and SNMP can be tested right now."
 		return result, http.StatusBadRequest
 	}
 	if source.Host == "" || source.Username == "" {
