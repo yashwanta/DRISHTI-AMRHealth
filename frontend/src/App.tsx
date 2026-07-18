@@ -14,6 +14,8 @@ import AMRLogsPage from "./pages/AMRLogsPage"
 import LoginPage from "./pages/LoginPage"
 import ServersPage from "./pages/ServersPage"
 import SyncPage from "./pages/SyncPage"
+import ChangePasswordPage from "./pages/ChangePasswordPage"
+import UserManagementPage from "./pages/UserManagementPage"
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1 } },
@@ -26,7 +28,6 @@ export default function App() {
         <AuthProvider>
           <BrowserRouter>
             <Routes>
-              <Route path="/amr/*" element={<AmrHealthApp />} />
               <Route path="/login" element={<LoginPage />} />
               <Route path="/*" element={<SiteOpsShell />} />
             </Routes>
@@ -39,7 +40,7 @@ export default function App() {
 
 function SiteOpsShell() {
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
+    <div className="flex h-screen bg-gray-950 overflow-hidden">
       <AmrSidebar />
       <main className="flex-1 overflow-hidden flex flex-col">
         <Routes>
@@ -49,10 +50,14 @@ function SiteOpsShell() {
           <Route path="/agent" element={<AgentPage />} />
           <Route path="/agent/fleet" element={<AMRFleetPage />} />
           <Route path="/amr-logs" element={<AMRLogsPage />} />
-          <Route path="/servers" element={<AdminRoute><ServersPage /></AdminRoute>} />
-          <Route path="/sync" element={<AdminRoute><SyncPage /></AdminRoute>} />
+          <Route path="/amr/discovery" element={<AdminRoute permission="discovery"><AmrHealthApp embedded /></AdminRoute>} />
+          <Route path="/amr/heatmap" element={<AdminRoute permission="heatmap"><AmrHealthApp embedded /></AdminRoute>} />
+          <Route path="/amr/*" element={<AmrHealthApp embedded />} />
+          <Route path="/servers" element={<AdminRoute permission="servers"><ServersPage /></AdminRoute>} />
+          <Route path="/sync" element={<AdminRoute permission="sync"><SyncPage /></AdminRoute>} />
+          <Route path="/change-password" element={<AdminRoute permission="change_password"><ChangePasswordPage /></AdminRoute>} />
+          <Route path="/users" element={<AdminRoute permission="users"><UserManagementPage /></AdminRoute>} />
           <Route path="/fleet" element={<Navigate to="/agent/fleet" replace />} />
-          <Route path="/amr" element={<Navigate to="/amr/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -60,10 +65,14 @@ function SiteOpsShell() {
   )
 }
 
-function AdminRoute({ children }: { children: ReactNode }) {
+function AdminRoute({ children, permission }: { children: ReactNode; permission: import('./types').AdminPermission }) {
   const auth = useAuth()
+  if (!auth.ready) {
+    return null
+  }
   if (!auth.isAuthenticated) {
     return <Navigate to="/login" replace />
   }
+  if (!auth.hasPermission(permission)) return <Navigate to="/" replace />
   return <>{children}</>
 }

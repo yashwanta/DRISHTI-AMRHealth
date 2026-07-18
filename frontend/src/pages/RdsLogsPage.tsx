@@ -4,14 +4,15 @@ import { format, subDays, startOfDay } from 'date-fns'
 import { clsx } from 'clsx'
 import {
   Wifi, WifiOff, CheckCircle, XCircle, AlertTriangle,
-  RefreshCw, Search, Download, ChevronDown, Eye, Zap, Radio
+  RefreshCw, Search, Download, ChevronDown, Eye, Zap, Radio, KeyRound, BrainCircuit
 } from 'lucide-react'
 import {
   getRdsPlants, getRdsConnectionStatus, testRdsConnection,
-  discoverRdsSources, fetchRdsLogs, getRdsLogs
+  discoverRdsSources, explainRdsIncident, getRdsLogs, saveRdsCredentials, getServers, syncServer
 } from '../api/client'
+import { useAuth } from '../auth'
 import type {
-  RdsLogEntry, RdsLogFilters, RdsLogSource, RdsTestResult
+  AgentLogExplanation, RdsLogEntry, RdsLogFilters, RdsLogSource, RdsTestResult
 } from '../types'
 
 const SEVERITY_CLASS: Record<string, string> = {
@@ -57,6 +58,7 @@ function StatusCard({ icon: Icon, label, value, sub, color }: {
 
 export default function RdsLogsPage() {
   const qc = useQueryClient()
+  const auth = useAuth()
   const [selectedPlant, setSelectedPlant] = useState<string>('')
   const [keyword, setKeyword] = useState('')
   const [fromDate, setFromDate] = useState('')
@@ -74,6 +76,14 @@ export default function RdsLogsPage() {
   const [fetchResult, setFetchResult] = useState<{ event_count?: number; message?: string } | null>(null)
   const [detailEntry, setDetailEntry] = useState<RdsLogEntry | null>(null)
   const [showExportMenu, setShowExportMenu] = useState(false)
+  const [showCredentials, setShowCredentials] = useState(false)
+  const [rdsUsername, setRdsUsername] = useState('robowatch')
+  const [rdsPassword, setRdsPassword] = useState('')
+  const [credentialError, setCredentialError] = useState('')
+  const [savingCredentials, setSavingCredentials] = useState(false)
+  const [agentAnalyzing, setAgentAnalyzing] = useState(false)
+  const [agentFinding, setAgentFinding] = useState<AgentLogExplanation | null>(null)
+  const [agentError, setAgentError] = useState('')
 
   // Plant config loaded from backend
   const { data: plants = [] } = useQuery({
@@ -81,6 +91,7 @@ export default function RdsLogsPage() {
     queryFn: getRdsPlants,
     staleTime: 5 * 60_000,
   })
+  const { data: servers = [] } = useQuery({ queryKey: ['servers'], queryFn: getServers })
 
   // Auto-select first plant
   useEffect(() => {
@@ -140,6 +151,18 @@ export default function RdsLogsPage() {
     }
   }
 
+  async function handleSaveCredentials() {
+    if (!selectedPlant || !rdsPassword) return
+    setSavingCredentials(true); setCredentialError('')
+    try {
+      await saveRdsCredentials(selectedPlant, rdsUsername, rdsPassword)
+      setRdsPassword(''); setShowCredentials(false)
+      await handleTestConnection()
+    } catch (err: any) {
+      setCredentialError(err?.response?.data?.error ?? 'Could not save RDS credentials')
+    } finally { setSavingCredentials(false) }
+  }
+
   async function handleDiscover() {
     if (!selectedPlant) return
     setDiscovering(true)
@@ -160,14 +183,38 @@ export default function RdsLogsPage() {
     setFetching(true)
     setFetchResult(null)
     try {
-      const result = await fetchRdsLogs(selectedPlant)
-      setFetchResult(result)
-      qc.invalidateQueries({ queryKey: ['rds-logs'] })
-      qc.invalidateQueries({ queryKey: ['rds-status', selectedPlant] })
+      const plant = plants.find(item => item.name === selectedPlant)
+      const host = plant ? new URL(plant.base_url).hostname : ''
+      const server = servers.find(item => item.host === host)
+      if (!server) throw new Error(`No FleetManager SSH server is configured for ${selectedPlant}`)
+      await syncServer(server.id)
+      setFetchResult({ message: `FleetManager SSH sync queued for ${selectedPlant}. Existing events are shown below; new events will appear when the sync finishes.` })
+      window.setTimeout(() => { qc.invalidateQueries({ queryKey: ['rds-logs'] }); qc.invalidateQueries({ queryKey: ['rds-status', selectedPlant] }) }, 5000)
+      window.setTimeout(() => { qc.invalidateQueries({ queryKey: ['rds-logs'] }); qc.invalidateQueries({ queryKey: ['rds-status', selectedPlant] }) }, 15000)
     } catch (err: any) {
       setFetchResult({ message: err?.response?.data?.error ?? 'Fetch failed' })
     } finally {
       setFetching(false)
+    }
+  }
+
+  async function handleAgentAnalyze() {
+    if (entries.length === 0) return
+    setAgentAnalyzing(true)
+    setAgentError('')
+    try {
+      const severityRank = (severity: string) => ({ critical: 4, high: 3, medium: 2, low: 1, info: 0 }[severity] ?? 0)
+      const prioritized = [...entries].sort((a, b) => {
+        const severityDelta = severityRank(b.severity) - severityRank(a.severity)
+        if (severityDelta !== 0) return severityDelta
+        return Number(b.execution_evidence) - Number(a.execution_evidence)
+      }).slice(0, 100)
+      const context = `RDS/FleetManager incident; plant=${selectedPlant}; robot=${filterRobot || 'all'}; category=${filterCategory || 'all'}; severity=${filterSeverity || 'all'}; evidence=${filterExecEvidence === '' ? 'all' : filterExecEvidence ? 'execution only' : 'non-execution'}; query=${keyword || 'none'}; range=${fromDate || 'all'} to ${toDate || 'now'}`
+      setAgentFinding(await explainRdsIncident(prioritized, context))
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : 'Agent could not analyze the RDS evidence.')
+    } finally {
+      setAgentAnalyzing(false)
     }
   }
 
@@ -224,6 +271,7 @@ export default function RdsLogsPage() {
                 <option key={p.name} value={p.name}>{p.name} ({p.system_type})</option>
               ))}
             </select>
+            {auth.canAdmin && <button onClick={() => { const plant = plants.find(p => p.name === selectedPlant); setRdsUsername(plant?.username || 'robowatch'); setCredentialError(''); setShowCredentials(true) }} disabled={!selectedPlant} className='inline-flex items-center gap-1.5 text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white rounded-md transition-colors'><KeyRound size={12}/> RDS Password</button>}
             <button
               onClick={handleTestConnection}
               disabled={!selectedPlant || testing}
@@ -247,6 +295,14 @@ export default function RdsLogsPage() {
             >
               {fetching ? <RefreshCw size={12} className='animate-spin' /> : <Download size={12} />}
               Pull Logs
+            </button>
+            <button
+              onClick={handleAgentAnalyze}
+              disabled={!selectedPlant || entries.length === 0 || agentAnalyzing}
+              className='inline-flex items-center gap-1.5 text-xs px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 disabled:opacity-40 text-white rounded-md transition-colors'
+            >
+              {agentAnalyzing ? <RefreshCw size={12} className='animate-spin' /> : <BrainCircuit size={12} />}
+              {agentAnalyzing ? 'Analyzing...' : 'Agent: Analyze RDS Incident'}
             </button>
           </div>
         </div>
@@ -282,11 +338,10 @@ export default function RdsLogsPage() {
               <div className='space-y-1'>
                 <span className='inline-flex items-center gap-1.5'>
                   <AlertTriangle size={12} />
-                  <strong>No log events found via the Roboshop API for {selectedPlant}.</strong>
+                  <strong>No new log events were returned for {selectedPlant}.</strong>
                 </span>
                 <p className='text-gray-400 mt-1'>
-                  These Roboshop systems don't expose log data through their REST API — only robot UUIDs are available.
-                  Log events are collected via SSH journal sync and are already visible on the{' '}
+                  RDS log events are collected through the FleetManager SSH journal sync and are also visible on the{' '}
                   <a href='/logs' className='text-blue-400 underline hover:text-blue-300'>Logs page</a>{' '}
                   and{' '}
                   <a href='/amr-logs' className='text-blue-400 underline hover:text-blue-300'>AMR Logs page</a>.
@@ -322,6 +377,29 @@ export default function RdsLogsPage() {
           </div>
         )}
       </div>
+      {showCredentials && <div className='fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4'><div className='w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 shadow-2xl'><div className='p-5 border-b border-gray-800'><h2 className='font-semibold text-white'>Configure {selectedPlant} RDS Login</h2><p className='text-xs text-gray-400 mt-1'>The password is encrypted before it is stored. Saving automatically runs Test Connection.</p></div><div className='p-5 space-y-4'><label className='block'><span className='block text-xs text-gray-400 mb-1'>Username</span><input className='w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-sm text-white' value={rdsUsername} onChange={e => setRdsUsername(e.target.value)}/></label><label className='block'><span className='block text-xs text-gray-400 mb-1'>Password</span><input autoFocus type='password' autoComplete='new-password' className='w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-sm text-white' value={rdsPassword} onChange={e => setRdsPassword(e.target.value)}/></label>{credentialError && <div className='text-xs text-red-300 border border-red-800 bg-red-950/40 rounded-md p-2'>{credentialError}</div>}</div><div className='p-5 border-t border-gray-800 flex justify-end gap-2'><button onClick={() => { setShowCredentials(false); setRdsPassword('') }} className='px-4 py-2 text-sm rounded-md bg-gray-800 text-gray-300'>Cancel</button><button onClick={handleSaveCredentials} disabled={!rdsPassword || savingCredentials} className='px-4 py-2 text-sm rounded-md bg-blue-600 text-white disabled:opacity-50'>{savingCredentials ? 'Saving...' : 'Save & Test'}</button></div></div></div>}
+
+      {(agentFinding || agentError) && (
+        <section className='flex-shrink-0 mx-6 my-3 bg-gray-800 border border-cyan-900 rounded-lg p-4 space-y-3 max-h-[42vh] overflow-y-auto'>
+          <div className='flex items-start justify-between gap-3'>
+            <div>
+              <h2 className='text-sm font-semibold text-white flex items-center gap-2'><BrainCircuit size={14} className='text-cyan-400' /> RDS Agent Findings</h2>
+              <p className='text-xs text-gray-400 mt-1'>Advisory analysis of the current plant and visible filters. No remediation was executed.</p>
+            </div>
+            {agentFinding && <div className='text-right'><span className='text-xs capitalize px-2 py-1 rounded border border-cyan-800 bg-cyan-950/40 text-cyan-200'>{agentFinding.confidence} confidence</span><div className='text-[10px] text-gray-500 mt-2'>via {agentFinding.via}</div></div>}
+          </div>
+          {agentError && <div className='text-sm text-red-300 bg-red-950/30 border border-red-900 rounded-md p-3'>{agentError}</div>}
+          {agentFinding && <>
+            <div className='grid grid-cols-1 md:grid-cols-2 gap-3'>
+              <div className='bg-gray-900 border border-gray-700 rounded-md p-3'><div className='text-[11px] uppercase tracking-wide text-cyan-300 font-semibold mb-1'>What it means</div><p className='text-sm text-gray-200'>{agentFinding.plain_english}</p></div>
+              <div className='bg-gray-900 border border-gray-700 rounded-md p-3'><div className='text-[11px] uppercase tracking-wide text-cyan-300 font-semibold mb-1'>Likely cause</div><p className='text-sm text-gray-200'>{agentFinding.likely_cause}</p></div>
+            </div>
+            <div><div className='text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-1'>Evidence used</div><ul className='list-disc list-inside space-y-1 text-xs text-gray-300'>{agentFinding.evidence.map((item, index) => <li key={index}>{item}</li>)}</ul></div>
+            <div><div className='text-[11px] uppercase tracking-wide text-green-300 font-semibold mb-1'>Suggested remediation</div><ol className='list-decimal list-inside space-y-1 text-sm text-gray-200'>{agentFinding.remediation_steps.map((item, index) => <li key={index}>{item}</li>)}</ol></div>
+            {agentFinding.caveats.length > 0 && <div className='bg-yellow-950/20 border border-yellow-900 rounded-md p-3'><div className='text-[11px] uppercase tracking-wide text-yellow-300 font-semibold mb-1'>Verify before action</div><ul className='list-disc list-inside space-y-1 text-xs text-yellow-100/80'>{agentFinding.caveats.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+          </>}
+        </section>
+      )}
 
       {/* ── Status cards ─────────────────────────────────────────── */}
       {selectedPlant && connStatus && (
@@ -479,7 +557,7 @@ export default function RdsLogsPage() {
           <div className='flex flex-col items-center justify-center h-full text-gray-500'>
             <AlertTriangle size={32} className='mb-3 opacity-40' />
             <p className='text-sm'>No logs found for this plant and filter set.</p>
-            <p className='text-xs text-gray-600 mt-1'>Click "Pull Logs" to ingest logs from the RoboWatch system.</p>
+            <p className='text-xs text-gray-600 mt-1'>Click "Pull Logs" to queue the FleetManager SSH collector for this plant.</p>
           </div>
         ) : (
           <table className='w-full text-xs'>

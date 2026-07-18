@@ -1,25 +1,77 @@
-﻿package handlers
+package handlers
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"drishti-amr-health/internal/config"
 	"drishti-amr-health/internal/robowatch"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type RobowatchHandler struct {
-	db *pgxpool.Pool
+	db            *pgxpool.Pool
+	encryptionKey string
 }
 
-func NewRobowatchHandler(db *pgxpool.Pool) *RobowatchHandler {
-	return &RobowatchHandler{db: db}
+func NewRobowatchHandler(db *pgxpool.Pool, encryptionKey string) *RobowatchHandler {
+	return &RobowatchHandler{db: db, encryptionKey: encryptionKey}
+}
+
+func (h *RobowatchHandler) credentials(ctx context.Context, plant string) (string, string) {
+	pCfg := config.GetPlant(plant)
+	if pCfg == nil {
+		return "", ""
+	}
+	var username, passwordEnc string
+	if err := h.db.QueryRow(ctx, `SELECT username,password_enc FROM rds_credentials WHERE plant=$1`, plant).Scan(&username, &passwordEnc); err == nil {
+		if password, err := decrypt(h.encryptionKey, passwordEnc); err == nil && password != "" {
+			return username, password
+		}
+	}
+	return pCfg.Username, config.GetRobowatchPassword(plant)
+}
+
+func (h *RobowatchHandler) SaveCredentials(w http.ResponseWriter, r *http.Request) {
+	plant := chi.URLParam(r, "plant")
+	pCfg := config.GetPlant(plant)
+	if pCfg == nil {
+		jsonError(w, "plant not found", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		req.Username = pCfg.Username
+	}
+	if req.Password == "" {
+		jsonError(w, "password is required", http.StatusBadRequest)
+		return
+	}
+	passwordEnc, err := encrypt(h.encryptionKey, req.Password)
+	if err != nil {
+		jsonError(w, "could not secure password", http.StatusInternalServerError)
+		return
+	}
+	_, err = h.db.Exec(r.Context(), `INSERT INTO rds_credentials(plant,username,password_enc,updated_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(plant) DO UPDATE SET username=EXCLUDED.username,password_enc=EXCLUDED.password_enc,updated_at=NOW()`, plant, req.Username, passwordEnc)
+	if err != nil {
+		jsonError(w, "could not save credentials", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "saved", "plant": plant})
 }
 
 func (h *RobowatchHandler) ListPlants(w http.ResponseWriter, r *http.Request) {
@@ -47,24 +99,26 @@ func (h *RobowatchHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 
 	var lastPull *time.Time
 	var logsPulled int
-	var lastError, sourcesJSON *string
-
-	row := h.db.QueryRow(r.Context(),
-		`SELECT last_successful_pull, logs_pulled, last_error, available_sources
-			 FROM rds_connection_status WHERE plant = $1`, plant)
-	_ = row.Scan(&lastPull, &logsPulled, &lastError, &sourcesJSON)
+	var serverStatus string
+	var sourcesJSON []byte
+	host := plantRDSHost(plant)
+	_ = h.db.QueryRow(r.Context(), `SELECT s.last_sync_at, s.status, COUNT(le.id), COALESCE(json_agg(DISTINCT le.source) FILTER (WHERE le.source IS NOT NULL),'[]'::json) FROM servers s LEFT JOIN log_events le ON le.server_id=s.id WHERE s.host=$1 GROUP BY s.id,s.last_sync_at,s.status`, host).Scan(&lastPull, &serverStatus, &logsPulled, &sourcesJSON)
 
 	reachable := false
-	if pw := config.GetRobowatchPassword(plant); pw != "" {
+	if username, pw := h.credentials(r.Context(), plant); pw != "" {
 		pCfg := config.GetPlant(plant)
-		c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, pCfg.Username, pw)
+		c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, username, pw)
 		tr := c.TestConnection()
 		reachable = tr.Reachable && tr.Authenticated
 	}
 
 	sources := make([]string, 0)
-	if sourcesJSON != nil && *sourcesJSON != "" {
-		_ = json.Unmarshal([]byte(*sourcesJSON), &sources)
+	if len(sourcesJSON) > 0 {
+		_ = json.Unmarshal(sourcesJSON, &sources)
+	}
+	var lastError any
+	if serverStatus == "error" {
+		lastError = "FleetManager SSH sync is in error state"
 	}
 
 	jsonOK(w, map[string]any{
@@ -86,7 +140,7 @@ func (h *RobowatchHandler) TestConnection(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	pw := config.GetRobowatchPassword(plant)
+	username, pw := h.credentials(r.Context(), plant)
 	if pw == "" {
 		jsonOK(w, robowatch.TestResult{
 			Reachable: false, Authenticated: false, Success: false,
@@ -96,7 +150,7 @@ func (h *RobowatchHandler) TestConnection(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, pCfg.Username, pw)
+	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, username, pw)
 	jsonOK(w, c.TestConnection())
 }
 
@@ -108,13 +162,13 @@ func (h *RobowatchHandler) DiscoverSources(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	pw := config.GetRobowatchPassword(plant)
+	username, pw := h.credentials(r.Context(), plant)
 	if pw == "" {
 		jsonError(w, "ROBOWATCH password not configured for this plant", http.StatusInternalServerError)
 		return
 	}
 
-	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, pCfg.Username, pw)
+	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, username, pw)
 	sources, err := c.DiscoverSources()
 	if err != nil {
 		jsonError(w, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
@@ -131,13 +185,13 @@ func (h *RobowatchHandler) FetchLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pw := config.GetRobowatchPassword(plant)
+	username, pw := h.credentials(r.Context(), plant)
 	if pw == "" {
 		jsonError(w, "ROBOWATCH password not configured", http.StatusInternalServerError)
 		return
 	}
 
-	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, pCfg.Username, pw)
+	c := robowatch.NewClient(pCfg.BaseURL, pCfg.Port, username, pw)
 	rawLines, err := c.FetchLogs(time.Time{}, time.Time{})
 	if err != nil {
 		h.recordFetchError(r.Context(), plant, err)
@@ -171,8 +225,9 @@ func (h *RobowatchHandler) FetchLogs(w http.ResponseWriter, r *http.Request) {
 
 func (h *RobowatchHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	host := plantRDSHost(q.Get("plant"))
 	args := []any{
-		nullable(q.Get("plant")),
+		nullable(host),
 		nullable(q.Get("from")),
 		nullable(q.Get("to")),
 		nullable(q.Get("robot")),
@@ -188,22 +243,25 @@ func (h *RobowatchHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	offset := 0
 	fmt.Sscanf(q.Get("offset"), "%d", &offset)
 
-	sql := `SELECT id, plant, source_system, timestamp, robot, "user", action, category,
-			       severity, message, raw_log, confidence, execution_evidence
-		        FROM rds_log_events
-		        WHERE ($1::text IS NULL OR plant = $1)
-		          AND ($2::timestamptz IS NULL OR timestamp >= $2)
-		          AND ($3::timestamptz IS NULL OR timestamp <= $3)
-		          AND ($4::text IS NULL OR robot ILIKE '%' || $4 || '%')
-		          AND ($5::text IS NULL OR "user" ILIKE '%' || $5 || '%')
-		          AND ($6::text IS NULL OR category = $6)
-		          AND ($7::text IS NULL OR severity = $7)
-		          AND ($8::boolean IS NULL OR execution_evidence = $8)
-		          AND ($9::text IS NULL OR message ILIKE '%' || $9 || '%' OR raw_log ILIKE '%' || $9 || '%')
-		        ORDER BY timestamp DESC
+	sql := `SELECT le.id, COALESCE($12::text,''), le.source, le.timestamp,
+			       COALESCE((regexp_match(le.message,'(?i)(AMR[-_ ]?[0-9]+|RBK[-_ ]?[0-9]+)'))[1],''),
+			       '', le.event_type,
+			       CASE WHEN le.event_type ILIKE '%charge%' OR le.message ILIKE '%charge%' THEN 'charge' WHEN le.event_type ILIKE '%dock%' OR le.message ILIKE '%dock%' THEN 'dock' WHEN le.event_type ILIKE '%nav%' OR le.message ILIKE '%gotarget%' THEN 'navigation' WHEN le.severity IN ('critical','high') THEN 'error' ELSE 'status' END,
+			       le.severity, le.message, COALESCE(le.raw_line,''), 'medium', false
+		        FROM log_events le JOIN servers s ON s.id=le.server_id
+		        WHERE ($1::text IS NULL OR s.host = $1)
+		          AND ($2::timestamptz IS NULL OR le.timestamp >= $2)
+		          AND ($3::timestamptz IS NULL OR le.timestamp <= $3)
+		          AND ($4::text IS NULL OR le.message ILIKE '%' || $4 || '%' OR COALESCE(le.raw_line,'') ILIKE '%' || $4 || '%')
+		          AND ($5::text IS NULL OR le.message ILIKE '%' || $5 || '%')
+		          AND ($6::text IS NULL OR le.event_type ILIKE '%' || $6 || '%' OR le.message ILIKE '%' || $6 || '%')
+		          AND ($7::text IS NULL OR le.severity = $7)
+		          AND ($8::boolean IS NULL OR $8 = false)
+		          AND ($9::text IS NULL OR le.message ILIKE '%' || $9 || '%' OR COALESCE(le.raw_line,'') ILIKE '%' || $9 || '%' OR le.source ILIKE '%' || $9 || '%')
+		        ORDER BY le.timestamp DESC
 		        LIMIT $10 OFFSET $11`
 
-	rows, err := h.db.Query(r.Context(), sql, append(args, limit, offset)...)
+	rows, err := h.db.Query(r.Context(), sql, append(args, limit, offset, q.Get("plant"))...)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("query failed: %v", err), http.StatusInternalServerError)
 		return
@@ -232,6 +290,18 @@ func (h *RobowatchHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 		entries = []map[string]any{}
 	}
 	jsonOK(w, entries)
+}
+
+func plantRDSHost(plant string) string {
+	pCfg := config.GetPlant(plant)
+	if pCfg == nil {
+		return ""
+	}
+	parsed, err := url.Parse(pCfg.BaseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func (h *RobowatchHandler) storeLogs(ctx context.Context, plant, sourceSystem string, rawLines []string) (int, error) {

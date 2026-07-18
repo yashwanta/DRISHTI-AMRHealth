@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"context"
@@ -8,16 +8,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"drishti-amr-health/internal/models"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type LogHandler struct {
-	db *pgxpool.Pool
+	db        *pgxpool.Pool
+	llmURL    string
+	llmModel  string
+	llmAPIKey string
 }
 
-func NewLogHandler(db *pgxpool.Pool) *LogHandler {
-	return &LogHandler{db: db}
+func NewLogHandler(db *pgxpool.Pool, llmURL, llmModel, llmAPIKey string) *LogHandler {
+	return &LogHandler{db: db, llmURL: llmURL, llmModel: llmModel, llmAPIKey: llmAPIKey}
 }
 
 func (h *LogHandler) List(w http.ResponseWriter, r *http.Request) {

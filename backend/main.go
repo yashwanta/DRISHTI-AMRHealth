@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -32,6 +33,7 @@ import (
 	"drishti-amr-health/internal/db"
 	"drishti-amr-health/internal/scheduler"
 	"github.com/joho/godotenv"
+	golangssh "golang.org/x/crypto/ssh"
 )
 
 type APIConnection struct {
@@ -42,14 +44,21 @@ type APIConnection struct {
 }
 
 type WifiSource struct {
-	Plant     string `json:"plant"`
-	Name      string `json:"name"`
-	Method    string `json:"method"`
-	Host      string `json:"host"`
-	Username  string `json:"username"`
-	SecretRef string `json:"secretRef"`
-	Command   string `json:"command"`
-	SavedAt   string `json:"savedAt"`
+	Plant       string `json:"plant"`
+	Name        string `json:"name"`
+	Method      string `json:"method"`
+	Host        string `json:"host"`
+	Username    string `json:"username"`
+	SecretRef   string `json:"secretRef"`
+	SSHUsername string `json:"sshUsername,omitempty"`
+	SSHKeyRef   string `json:"sshKeyRef,omitempty"`
+	SSHPort     int    `json:"sshPort,omitempty"`
+	SSHAuthType string `json:"sshAuthType,omitempty"`
+	SSHPassword string `json:"sshPassword,omitempty"`
+	Command     string `json:"command"`
+	SavedAt     string `json:"savedAt"`
+	TunnelHost  string `json:"-"`
+	SessionKey  string `json:"-"`
 }
 
 type WifiRobot struct {
@@ -78,6 +87,8 @@ type WifiDiscoverResult struct {
 	SNR     *int   `json:"snr_db,omitempty"`
 	APName  string `json:"ap_name,omitempty"`
 	Band    string `json:"band,omitempty"`
+	Band24  string `json:"band_24ghz,omitempty"`
+	Band5   string `json:"band_5ghz,omitempty"`
 	Channel string `json:"channel,omitempty"`
 }
 
@@ -99,6 +110,8 @@ type WifiTestResult struct {
 	SNR     *int   `json:"snr_db,omitempty"`
 	APName  string `json:"ap_name,omitempty"`
 	Band    string `json:"band,omitempty"`
+	Band24  string `json:"band_24ghz,omitempty"`
+	Band5   string `json:"band_5ghz,omitempty"`
 	Channel string `json:"channel,omitempty"`
 }
 type DiscoveryAMR struct {
@@ -108,6 +121,8 @@ type DiscoveryAMR struct {
 	SNRDB    *int   `json:"snr_db"`
 	APName   string `json:"ap_name"`
 	Band     string `json:"band"`
+	Band24   string `json:"band_24ghz"`
+	Band5    string `json:"band_5ghz"`
 	Channel  string `json:"channel"`
 	LastSeen string `json:"last_seen"`
 	Source   string `json:"source"`
@@ -181,13 +196,17 @@ type BadZoneExportRow struct {
 }
 
 type Server struct {
-	configPath     string
-	staticDir      string
-	client         *http.Client
-	db             *sql.DB
-	ackPath        string
-	tpLinkMu       sync.Mutex
-	tpLinkLockouts map[string]time.Time
+	configPath        string
+	staticDir         string
+	client            *http.Client
+	db                *sql.DB
+	ackPath           string
+	tpLinkMu          sync.Mutex
+	tpLinkLockouts    map[string]time.Time
+	tpLinkSessions    map[string]*tpLinkSession
+	tpLinkDeviceLocks map[string]*sync.Mutex
+	discoveryMu       sync.Mutex
+	discoveryPath     string
 }
 
 func main() {
@@ -198,10 +217,11 @@ func main() {
 
 	// Native AMR Health server (wifi, bad-zones, plant proxy, connections).
 	nativeServer := &Server{
-		configPath: env("DRISHTI_API_CONFIG", filepath.Join("data", "config", "api-connections.json")),
-		staticDir:  env("DRISHTI_STATIC_DIR", filepath.Join("frontend", "dist")),
-		client:     &http.Client{Timeout: 20 * time.Second},
-		ackPath:    env("DRISHTI_ZONE_ACK_FILE", filepath.Join("data", "reports", "zone-acknowledgements.json")),
+		configPath:    env("DRISHTI_API_CONFIG", filepath.Join("data", "config", "api-connections.json")),
+		staticDir:     env("DRISHTI_STATIC_DIR", filepath.Join("frontend", "dist")),
+		client:        &http.Client{Timeout: 20 * time.Second},
+		ackPath:       env("DRISHTI_ZONE_ACK_FILE", filepath.Join("data", "reports", "zone-acknowledgements.json")),
+		discoveryPath: env("DRISHTI_WIFI_READINGS_FILE", filepath.Join("data", "discovery", "wifi-readings.json")),
 	}
 	if err := nativeServer.initReportStore(); err != nil {
 		log.Printf("report store warning: %v", err)
@@ -341,6 +361,12 @@ func (s *Server) discoveryAMRs(plant string) ([]DiscoveryAMR, string, error) {
 			message = message + " " + fallbackMessage
 		}
 	}
+	if cached, cacheErr := s.loadDiscoveryReadings(plant); cacheErr != nil {
+		log.Printf("discovery readings warning: %v", cacheErr)
+	} else if len(cached) > 0 {
+		items = mergeDiscoveryItems(items, cached)
+		message += " Stored TP-Link readings are merged when available."
+	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Plant != items[j].Plant {
 			return items[i].Plant < items[j].Plant
@@ -348,6 +374,70 @@ func (s *Server) discoveryAMRs(plant string) ([]DiscoveryAMR, string, error) {
 		return items[i].AMR < items[j].AMR
 	})
 	return items, message, nil
+}
+
+func (s *Server) loadDiscoveryReadings(plant string) ([]DiscoveryAMR, error) {
+	if strings.TrimSpace(s.discoveryPath) == "" {
+		return nil, nil
+	}
+	s.discoveryMu.Lock()
+	defer s.discoveryMu.Unlock()
+	data, err := os.ReadFile(s.discoveryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var readings []DiscoveryAMR
+	if err := json.Unmarshal(data, &readings); err != nil {
+		return nil, err
+	}
+	filtered := make([]DiscoveryAMR, 0, len(readings))
+	for _, reading := range readings {
+		if reading.Band == "" {
+			reading.Band = inferBandFromChannel(reading.Channel)
+		}
+		if plant == "" || strings.EqualFold(reading.Plant, plant) {
+			filtered = append(filtered, reading)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Server) saveDiscoveryReading(result WifiDiscoverResult) error {
+	if strings.TrimSpace(s.discoveryPath) == "" || result.RSSI == nil || !validRSSI(*result.RSSI) {
+		return nil
+	}
+	s.discoveryMu.Lock()
+	defer s.discoveryMu.Unlock()
+	readings := []DiscoveryAMR{}
+	if data, err := os.ReadFile(s.discoveryPath); err == nil {
+		_ = json.Unmarshal(data, &readings)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	reading := DiscoveryAMR{Plant: result.Plant, AMR: result.AMR, RSSIDBM: result.RSSI, SNRDB: result.SNR, APName: firstString(result.APName, result.SSID), Band: result.Band, Band24: result.Band24, Band5: result.Band5, Channel: result.Channel, LastSeen: time.Now().UTC().Format(time.RFC3339), Source: "TP-Link Web UI"}
+	key := strings.ToLower(reading.Plant + "|" + reading.AMR)
+	updated := false
+	for i := range readings {
+		if strings.ToLower(readings[i].Plant+"|"+readings[i].AMR) == key {
+			readings[i] = reading
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		readings = append(readings, reading)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.discoveryPath), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(readings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.discoveryPath, append(data, '\n'), 0o600)
 }
 
 func discoveryFromSnapshots(plant string, plantBySlug map[string]string) ([]DiscoveryAMR, error) {
@@ -487,6 +577,7 @@ func mergeDiscoveryItems(primary, fallback []DiscoveryAMR) []DiscoveryAMR {
 	for _, item := range primary {
 		key := strings.ToLower(item.Plant + "|" + item.AMR)
 		if fallbackItem, ok := byKey[key]; ok {
+			usedFallbackRSSI := item.RSSIDBM == nil || *item.RSSIDBM == 0
 			if item.RSSIDBM == nil || *item.RSSIDBM == 0 {
 				item.RSSIDBM = fallbackItem.RSSIDBM
 			}
@@ -499,13 +590,19 @@ func mergeDiscoveryItems(primary, fallback []DiscoveryAMR) []DiscoveryAMR {
 			if item.Band == "" {
 				item.Band = fallbackItem.Band
 			}
+			if item.Band24 == "" {
+				item.Band24 = fallbackItem.Band24
+			}
+			if item.Band5 == "" {
+				item.Band5 = fallbackItem.Band5
+			}
 			if item.Channel == "" {
 				item.Channel = fallbackItem.Channel
 			}
-			if item.LastSeen == "" {
+			if item.LastSeen == "" || usedFallbackRSSI {
 				item.LastSeen = fallbackItem.LastSeen
 			}
-			if fallbackItem.Source != "" && item.RSSIDBM == fallbackItem.RSSIDBM {
+			if fallbackItem.Source != "" && usedFallbackRSSI {
 				item.Source = fallbackItem.Source
 			}
 		}
@@ -749,6 +846,12 @@ func (s *Server) initReportStore() error {
 }
 
 func (s *Server) close() {
+	s.tpLinkMu.Lock()
+	for key, session := range s.tpLinkSessions {
+		session.close()
+		delete(s.tpLinkSessions, key)
+	}
+	s.tpLinkMu.Unlock()
 	if s.db != nil {
 		_ = s.db.Close()
 	}
@@ -1492,6 +1595,15 @@ func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResp
 	if source.Method == "AMR SSH" && source.Username == "" {
 		return wifiDiscoverError("Username is required for AMR RSSI auto-discovery."), http.StatusBadRequest
 	}
+	if isTPLinkMethod(source.Method) && source.SSHUsername == "" {
+		return wifiDiscoverError("AMR SSH username is required to reach http://192.168.1.254 through each robot."), http.StatusBadRequest
+	}
+	if isTPLinkMethod(source.Method) && strings.EqualFold(source.SSHAuthType, "Password") && source.SSHPassword == "" {
+		return wifiDiscoverError("AMR SSH password is required when Password authentication is selected."), http.StatusBadRequest
+	}
+	if isTPLinkMethod(source.Method) && !strings.EqualFold(source.SSHAuthType, "Password") && source.SSHKeyRef == "" {
+		return wifiDiscoverError("AMR SSH private key path is required when Private Key authentication is selected."), http.StatusBadRequest
+	}
 	if source.Method == "AMR SSH" && looksLikePublicKey(source.SecretRef) {
 		return wifiDiscoverError("Credential Reference looks like a public key. Use the private key file path available to the DRISHTI container, for example /app/data/keys/<key_file>."), http.StatusBadRequest
 	}
@@ -1516,6 +1628,9 @@ func (s *Server) discoverWifiRSSI(request WifiDiscoverRequest) (WifiDiscoverResp
 		}
 		if result.OK {
 			okCount++
+			if err := s.saveDiscoveryReading(result); err != nil {
+				log.Printf("save TP-Link discovery reading warning: %v", err)
+			}
 		}
 		results = append(results, result)
 	}
@@ -1566,20 +1681,20 @@ func (s *Server) discoverRobotRSSI(source WifiSource, robot WifiRobot) WifiDisco
 
 func (s *Server) discoverRobotTPLinkRSSI(source WifiSource, robot WifiRobot) WifiDiscoverResult {
 	host := strings.TrimSpace(source.Host)
-	if host == "" {
-		host = robot.IP
-	} else {
-		host = strings.ReplaceAll(host, "{ip}", robot.IP)
-		host = strings.ReplaceAll(host, "{amr}", robot.Name)
+	sshPort := source.SSHPort
+	if sshPort <= 0 {
+		sshPort = 8022
 	}
-	result := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: host, Command: source.Command}
-	if host == "" || host == "unknown" {
+	result := WifiDiscoverResult{Plant: robot.Plant, AMR: robot.Name, Host: fmt.Sprintf("%s:%d -> %s", robot.IP, sshPort, host), Command: source.Command}
+	if host == "" {
 		result.Status = "failed"
-		result.Message = "No TP-Link URL/IP available for this AMR. Enter a TP-Link URL or use {ip} template."
+		result.Message = "TP-Link URL is required; use http://192.168.1.254 for AMR-local access."
 		return result
 	}
 	tpSource := source
 	tpSource.Host = host
+	tpSource.TunnelHost = robot.IP
+	tpSource.SessionKey = strings.ToLower(strings.TrimSpace(robot.Plant) + "|" + strings.TrimSpace(robot.Name) + "|" + strings.TrimSpace(robot.IP))
 	reading, err := s.fetchTPLinkReading(tpSource)
 	result.Output = reading.Output
 	result.RSSI = reading.RSSI
@@ -1587,6 +1702,8 @@ func (s *Server) discoverRobotTPLinkRSSI(source WifiSource, robot WifiRobot) Wif
 	result.SNR = reading.SNR
 	result.APName = reading.APName
 	result.Band = reading.Band
+	result.Band24 = reading.Band24
+	result.Band5 = reading.Band5
 	result.Channel = reading.Channel
 	if err != nil {
 		result.Status = "failed"
@@ -1602,7 +1719,7 @@ func (s *Server) discoverRobotTPLinkRSSI(source WifiSource, robot WifiRobot) Wif
 		}
 		return result
 	}
-	if reading.RSSI == nil {
+	if reading.RSSI == nil || !validRSSI(*reading.RSSI) {
 		result.Status = "partial"
 		result.Message = "TP-Link page loaded, but no RSSI value was found."
 		result.Quality = "Unknown"
@@ -1647,6 +1764,16 @@ func normalizeWifiSource(source WifiSource) WifiSource {
 	source.Host = strings.TrimSpace(source.Host)
 	source.Username = strings.TrimSpace(source.Username)
 	source.SecretRef = strings.TrimSpace(source.SecretRef)
+	source.SSHUsername = strings.TrimSpace(source.SSHUsername)
+	source.SSHKeyRef = strings.TrimSpace(source.SSHKeyRef)
+	source.SSHAuthType = strings.TrimSpace(source.SSHAuthType)
+	source.SSHPassword = strings.TrimSpace(source.SSHPassword)
+	if source.SSHPort <= 0 {
+		source.SSHPort = 8022
+	}
+	if source.SSHAuthType == "" {
+		source.SSHAuthType = "Private Key"
+	}
 	source.Command = strings.TrimSpace(source.Command)
 	return source
 }
@@ -1684,8 +1811,16 @@ type tpLinkReading struct {
 	SNR     *int
 	APName  string
 	Band    string
+	Band24  string
+	Band5   string
 	Channel string
 	Output  string
+}
+
+type tpLinkSession struct {
+	Token     string
+	Client    *http.Client
+	SSHClient *golangssh.Client
 }
 
 func isTPLinkMethod(method string) bool {
@@ -1789,42 +1924,172 @@ func (s *Server) fetchTPLinkReading(source WifiSource) (tpLinkReading, error) {
 	if err != nil {
 		return tpLinkReading{}, err
 	}
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Jar:     jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 	username := strings.TrimSpace(source.Username)
 	password := strings.TrimSpace(source.SecretRef)
+	key := strings.TrimSpace(source.SessionKey)
+	if key == "" {
+		key = s.tpLinkLockoutKey(base, username)
+	}
+	deviceLock := s.tpLinkDeviceLock(key)
+	deviceLock.Lock()
+	defer deviceLock.Unlock()
+
+	if remaining := s.tpLinkLockoutRemaining(key); remaining > 0 {
+		seconds := durationSeconds(remaining)
+		return tpLinkReading{}, &tpLinkIntegrationError{Status: "auth_locked", RetryAfterSeconds: seconds, Message: fmt.Sprintf("Retry later: TP-Link login for this AMR is locked for about %d more seconds.", seconds)}
+	}
+
+	session := s.tpLinkSession(key)
+	if session == nil {
+		session, err = newTPLinkSession(source)
+		if err != nil {
+			return tpLinkReading{}, &tpLinkIntegrationError{Status: "connection_failed", Message: err.Error()}
+		}
+	}
 	if username == "" || password == "" || isPlaceholderCredential(password) {
-		output, reachErr := tpLinkReachabilityCheck(client, base, password)
+		output, reachErr := tpLinkReachabilityCheck(session.Client, base, password)
 		if reachErr != nil {
+			session.close()
 			return tpLinkReading{Output: output}, &tpLinkIntegrationError{Status: "connection_failed", Message: fmt.Sprintf("Device connection failed: %v", reachErr)}
 		}
+		session.close()
 		return tpLinkReading{Output: output}, &tpLinkIntegrationError{Status: "device_reachable", Message: "Device reachable; TP-Link username and write-only password are required before RSSI telemetry can be read."}
 	}
 
-	lockoutKey := s.tpLinkLockoutKey(base, username)
-	if remaining := s.tpLinkLockoutRemaining(lockoutKey); remaining > 0 {
-		seconds := durationSeconds(remaining)
-		return tpLinkReading{}, &tpLinkIntegrationError{Status: "auth_locked", RetryAfterSeconds: seconds, Message: fmt.Sprintf("TP-Link login is temporarily locked. Retry after about %d seconds.", seconds)}
+	if session.Token != "" {
+		reading, statusErr := tpLinkDSStatusReading(session.Client, base, session.Token, username, password)
+		if statusErr == nil {
+			return reading, nil
+		}
+		var tpErr *tpLinkIntegrationError
+		if !errors.As(statusErr, &tpErr) || tpErr.Status != "session_expired" {
+			if !errors.As(statusErr, &tpErr) {
+				s.forgetTPLinkSession(key)
+			}
+			return s.handleTPLinkError(key, reading, statusErr)
+		}
+		session.Token = ""
 	}
 
-	reading, err := tpLinkDSReading(client, base, username, password)
-	if err == nil {
-		return reading, nil
+	stok, loginOutput, loginErr := tpLinkDSLogin(session.Client, base, username, password)
+	if loginErr != nil {
+		session.close()
+		return s.handleTPLinkError(key, tpLinkReading{Output: loginOutput}, loginErr)
 	}
+	session.Token = stok
+	s.rememberTPLinkSession(key, session)
+	reading, statusErr := tpLinkDSStatusReading(session.Client, base, stok, username, password)
+	if statusErr != nil {
+		var tpErr *tpLinkIntegrationError
+		if errors.As(statusErr, &tpErr) && tpErr.Status == "session_expired" {
+			session.Token = ""
+		} else if !errors.As(statusErr, &tpErr) {
+			s.forgetTPLinkSession(key)
+		}
+		return s.handleTPLinkError(key, reading, statusErr)
+	}
+	return reading, nil
+}
+
+func (s *Server) handleTPLinkError(key string, reading tpLinkReading, err error) (tpLinkReading, error) {
 	var tpErr *tpLinkIntegrationError
 	if errors.As(err, &tpErr) {
 		if tpErr.Status == "auth_locked" && tpErr.RetryAfterSeconds > 0 {
-			s.rememberTPLinkLockout(lockoutKey, time.Duration(tpErr.RetryAfterSeconds)*time.Second)
+			s.rememberTPLinkLockout(key, time.Duration(tpErr.RetryAfterSeconds)*time.Second)
+			tpErr.Message = fmt.Sprintf("Retry later: TP-Link login for this AMR is locked for about %d seconds.", tpErr.RetryAfterSeconds)
 		}
 		return reading, tpErr
 	}
 	return reading, &tpLinkIntegrationError{Status: "failed", Message: err.Error()}
+}
+
+func (s *Server) tpLinkDeviceLock(key string) *sync.Mutex {
+	s.tpLinkMu.Lock()
+	defer s.tpLinkMu.Unlock()
+	if s.tpLinkDeviceLocks == nil {
+		s.tpLinkDeviceLocks = map[string]*sync.Mutex{}
+	}
+	if s.tpLinkDeviceLocks[key] == nil {
+		s.tpLinkDeviceLocks[key] = &sync.Mutex{}
+	}
+	return s.tpLinkDeviceLocks[key]
+}
+
+func (s *Server) tpLinkSession(key string) *tpLinkSession {
+	s.tpLinkMu.Lock()
+	defer s.tpLinkMu.Unlock()
+	return s.tpLinkSessions[key]
+}
+
+func (s *Server) rememberTPLinkSession(key string, session *tpLinkSession) {
+	s.tpLinkMu.Lock()
+	defer s.tpLinkMu.Unlock()
+	if s.tpLinkSessions == nil {
+		s.tpLinkSessions = map[string]*tpLinkSession{}
+	}
+	s.tpLinkSessions[key] = session
+}
+
+func (s *Server) forgetTPLinkSession(key string) {
+	s.tpLinkMu.Lock()
+	session := s.tpLinkSessions[key]
+	delete(s.tpLinkSessions, key)
+	s.tpLinkMu.Unlock()
+	session.close()
+}
+
+func (session *tpLinkSession) close() {
+	if session != nil && session.SSHClient != nil {
+		_ = session.SSHClient.Close()
+	}
+}
+
+func newTPLinkSession(source WifiSource) (*tpLinkSession, error) {
+	jar, _ := cookiejar.New(nil)
+	transport := &http.Transport{}
+	session := &tpLinkSession{}
+	if strings.TrimSpace(source.TunnelHost) != "" {
+		sshClient, err := dialAMRSSH(source)
+		if err != nil {
+			return nil, err
+		}
+		session.SSHClient = sshClient
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return sshClient.Dial(network, address)
+		}
+	}
+	session.Client = &http.Client{Timeout: 10 * time.Second, Jar: jar, Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	return session, nil
+}
+
+func dialAMRSSH(source WifiSource) (*golangssh.Client, error) {
+	var authMethod golangssh.AuthMethod
+	if strings.EqualFold(strings.TrimSpace(source.SSHAuthType), "Password") {
+		if strings.TrimSpace(source.SSHPassword) == "" {
+			return nil, errors.New("AMR SSH password is required")
+		}
+		authMethod = golangssh.Password(source.SSHPassword)
+	} else {
+		keyBytes, err := os.ReadFile(strings.TrimSpace(source.SSHKeyRef))
+		if err != nil {
+			return nil, fmt.Errorf("read AMR SSH private key: %w", err)
+		}
+		signer, err := golangssh.ParsePrivateKey(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse AMR SSH private key: %w", err)
+		}
+		authMethod = golangssh.PublicKeys(signer)
+	}
+	config := &golangssh.ClientConfig{User: strings.TrimSpace(source.SSHUsername), Auth: []golangssh.AuthMethod{authMethod}, HostKeyCallback: golangssh.InsecureIgnoreHostKey(), Timeout: 10 * time.Second}
+	port := source.SSHPort
+	if port <= 0 {
+		port = 8022
+	}
+	client, err := golangssh.Dial("tcp", net.JoinHostPort(strings.TrimSpace(source.TunnelHost), strconv.Itoa(port)), config)
+	if err != nil {
+		return nil, fmt.Errorf("SSH tunnel to AMR %s:%d failed: %w", source.TunnelHost, port, err)
+	}
+	return client, nil
 }
 
 func durationSeconds(value time.Duration) int {
@@ -1903,6 +2168,10 @@ func tpLinkDSReading(client *http.Client, base *url.URL, username, password stri
 	if err != nil {
 		return tpLinkReading{Output: loginOutput}, err
 	}
+	return tpLinkDSStatusReading(client, base, stok, username, password)
+}
+
+func tpLinkDSStatusReading(client *http.Client, base *url.URL, stok, username, password string) (tpLinkReading, error) {
 	var lastOutput string
 	var lastStatus string
 	for _, payload := range tpLinkDSStatusPayloads() {
@@ -1914,7 +2183,7 @@ func tpLinkDSReading(client *http.Client, base *url.URL, username, password stri
 		if err != nil {
 			var tpErr *tpLinkIntegrationError
 			if errors.As(tpLinkDSError(body, err), &tpErr) {
-				if tpErr.Status == "auth_locked" || tpErr.Status == "auth_failed" {
+				if tpErr.Status == "auth_locked" || tpErr.Status == "auth_failed" || tpErr.Status == "session_expired" {
 					return tpLinkReading{Output: clean}, tpErr
 				}
 			}
@@ -1953,7 +2222,9 @@ func tpLinkDSLogin(client *http.Client, base *url.URL, username, password string
 			"password": password,
 		},
 	}
-	body, _, err := tpLinkDSPost(client, base, "null", payload, username, password)
+	// TL-CPE1300D firmware accepts the login payload at POST /. Only requests
+	// made after authentication use /stok=<session-token>/ds.
+	body, _, err := tpLinkDSPost(client, base, "", payload, username, password)
 	clean := sanitizeTPLinkOutput(trimOutput(normalizeTPLinkText(body)), password)
 	if err != nil {
 		return "", clean, tpLinkDSError(body, err)
@@ -1989,7 +2260,7 @@ func tpLinkDSError(body string, fallback error) error {
 		return &tpLinkIntegrationError{Status: status, Message: message, RetryAfterSeconds: seconds}
 	}
 	if code == -40101 || code == -40100 || code == -40301 {
-		return &tpLinkIntegrationError{Status: "auth_failed", Message: fmt.Sprintf("TP-Link session was rejected or expired before RSSI telemetry was available (error_code %d).", code)}
+		return &tpLinkIntegrationError{Status: "session_expired", Message: fmt.Sprintf("TP-Link session expired (error_code %d); the next request will authenticate once and refresh the cached token.", code)}
 	}
 	return fallback
 }
@@ -2044,7 +2315,11 @@ func tpLinkDSStatusPayloads() []map[string]any {
 
 func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, username, password string) (string, string, error) {
 	target := *base
-	target.Path = normalizePath("/stok="+url.PathEscape(stok)+"/ds", "/")
+	if stok == "" {
+		target.Path = normalizePath("/", "/")
+	} else {
+		target.Path = normalizePath("/stok="+url.PathEscape(stok)+"/ds", "/")
+	}
 	target.RawQuery = ""
 	target.Fragment = ""
 	bodyBytes, err := json.Marshal(payload)
@@ -2083,6 +2358,9 @@ func tpLinkDSPost(client *http.Client, base *url.URL, stok string, payload any, 
 	responseType := tpLinkResponseType(resp.Header.Get("Content-Type"), bodyText)
 	log.Printf("tplink rssi path=%q http_status=%q error_code=%s token=%t cookie=%t response_type=%q", tpLinkSanitizedPath(target.Path), resp.Status, codeText, tokenReceived, cookieReceived, responseType)
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return bodyText, resp.Status, &tpLinkIntegrationError{Status: "session_expired", Message: "TP-Link session returned HTTP 401; the cached token will be refreshed once."}
+		}
 		return bodyText, resp.Status, fmt.Errorf("TP-Link ds returned %s", resp.Status)
 	}
 	return bodyText, resp.Status, nil
@@ -2362,6 +2640,9 @@ func sanitizeTPLinkOutput(output, secret string) string {
 func parseTPLinkReading(output string) tpLinkReading {
 	reading := tpLinkReading{}
 	reading.RSSI = parseRSSI(output)
+	if reading.RSSI != nil && !validRSSI(*reading.RSSI) {
+		reading.RSSI = nil
+	}
 	reading.SSID = parseSSID(output)
 	reading.SNR = parseFirstInt(output, []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bSNR\b[^-\d]*(\d+)\s*dB`),
@@ -2371,7 +2652,48 @@ func parseTPLinkReading(output string) tpLinkReading {
 	reading.APName = parseLabelValue(output, []string{"BSSID", "AP MAC", "AP", "ap_name", "apName", "root_ap", "root_ap_mac", "mac", "bssid"})
 	reading.Channel = parseLabelValue(output, []string{"Channel", "channel", "chan"})
 	reading.Band = parseBand(output)
+	reading.Band24, reading.Band5 = parseTPLinkBandSummaries(output)
 	return reading
+}
+
+func parseTPLinkBandSummaries(output string) (string, string) {
+	var payload any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		return "", ""
+	}
+	band24, band5 := "", ""
+	var visit func(any)
+	visit = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			channel := strings.TrimSpace(fmt.Sprint(typed["channel"]))
+			rssi := strings.TrimSpace(fmt.Sprint(typed["rssi"]))
+			if channel != "" && channel != "<nil>" && rssi != "" && rssi != "<nil>" {
+				summary := fmt.Sprintf("%s dBm / ch %s", strings.TrimSuffix(rssi, " dBm"), channel)
+				if bssid := strings.TrimSpace(fmt.Sprint(typed["bssid"])); bssid != "" && bssid != "<nil>" {
+					summary += " / " + bssid
+				}
+				if inferBandFromChannel(channel) == "2.4 GHz" && band24 == "" {
+					band24 = summary
+				} else if inferBandFromChannel(channel) == "5 GHz" && band5 == "" {
+					band5 = summary
+				}
+			}
+			for _, child := range typed {
+				visit(child)
+			}
+		case []any:
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(payload)
+	return band24, band5
+}
+
+func validRSSI(value int) bool {
+	return value < 0 && value >= -120
 }
 
 func parseFirstInt(output string, patterns []*regexp.Regexp) *int {
@@ -2419,7 +2741,18 @@ func parseBand(output string) string {
 	if strings.Contains(lower, "2.4g") || strings.Contains(lower, "2.4 ghz") || strings.Contains(lower, "802.11b/g/n") {
 		return "2.4G"
 	}
-	return ""
+	return inferBandFromChannel(parseLabelValue(output, []string{"Channel", "channel", "chan"}))
+}
+
+func inferBandFromChannel(channel string) string {
+	value, err := strconv.Atoi(strings.TrimSpace(channel))
+	if err != nil || value <= 0 {
+		return ""
+	}
+	if value <= 14 {
+		return "2.4 GHz"
+	}
+	return "5 GHz"
 }
 func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 	source = normalizeWifiSource(source)
@@ -2437,6 +2770,8 @@ func (s *Server) testWifiSource(source WifiSource) (WifiTestResult, int) {
 		result.SNR = reading.SNR
 		result.APName = reading.APName
 		result.Band = reading.Band
+		result.Band24 = reading.Band24
+		result.Band5 = reading.Band5
 		result.Channel = reading.Channel
 		if err != nil {
 			result.Status = "failed"

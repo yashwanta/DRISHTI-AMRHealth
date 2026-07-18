@@ -37,8 +37,8 @@ export default function LoginPage() {
             <ShieldCheck size={22} className="text-blue-300" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold text-white">DRISHTI SiteOps</h1>
-            <p className="text-sm text-gray-400">Site operations and automation console</p>
+            <h1 className="text-xl font-semibold text-white">DRISHTI AMR Health</h1>
+            <p className="text-sm text-gray-400">AMR fleet health and diagnostics</p>
           </div>
         </div>
 

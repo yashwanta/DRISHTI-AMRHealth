@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { format, subDays, startOfDay, endOfDay } from 'date-fns'
-import { deepSync, getIncidentSummary, getLogs, getServers } from '../api/client'
+import { deepSync, explainLogErrors, getIncidentSummary, getLogs, getServers } from '../api/client'
 import type { LogFilters } from '../api/client'
-import type { IncidentSummary } from '../types'
+import type { AgentLogExplanation, IncidentSummary } from '../types'
 import LogsTable from '../components/logs/LogsTable'
 import { EVENT_TYPES, SEVERITIES, SOURCE_OPTIONS } from '../eventTaxonomy'
 
@@ -62,6 +62,9 @@ export default function LogsPage() {
   const [incident, setIncident] = useState<IncidentSummary | null>(null)
   const [investigating, setInvestigating] = useState(false)
   const [deepSyncing, setDeepSyncing] = useState(false)
+  const [agentExplaining, setAgentExplaining] = useState(false)
+  const [agentExplanation, setAgentExplanation] = useState<AgentLogExplanation | null>(null)
+  const [agentError, setAgentError] = useState('')
   const [filters, setFilters] = useState<LogFilters>(() => ({
     limit: 500,
     q: searchParams.get('q') ?? undefined,
@@ -168,6 +171,25 @@ export default function LogsPage() {
     }
   }
 
+  async function explainVisibleErrors() {
+    if (events.length === 0) return
+    setAgentExplaining(true)
+    setAgentError('')
+    try {
+      const prioritized = [...events].sort((a, b) => {
+        const rank = (severity: string) => ({ critical: 4, high: 3, medium: 2, low: 1, info: 0 }[severity] ?? 0)
+        return rank(b.severity) - rank(a.severity)
+      }).slice(0, 100)
+      const selectedServer = servers.find(server => server.id === filters.server_id)?.name ?? 'all visible servers'
+      const context = `Server: ${selectedServer}; query: ${keyword || 'none'}; event type: ${filters.event_type || 'all'}; source: ${filters.source || 'all'}; date range: ${fromDate || 'all'} to ${toDate || 'now'}`
+      setAgentExplanation(await explainLogErrors(prioritized, context))
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : 'Agent could not explain the visible evidence.')
+    } finally {
+      setAgentExplaining(false)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full bg-gray-900 text-gray-100">
       <div className="px-6 py-4 bg-gray-900 border-b border-gray-700">
@@ -261,6 +283,10 @@ export default function LogsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 border-t border-gray-700 pt-3">
+            <button onClick={explainVisibleErrors} disabled={events.length === 0 || agentExplaining}
+              className="text-xs px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-40">
+              {agentExplaining ? 'Agent analyzing...' : 'Agent: Explain & Remediate'}
+            </button>
             <button onClick={investigate} disabled={!filters.server_id || investigating}
               className="text-xs px-3 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40">
               {investigating ? 'Investigating...' : 'Investigate selected server'}
@@ -269,9 +295,55 @@ export default function LogsPage() {
               className="text-xs px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40">
               {deepSyncing ? 'Deep syncing...' : 'Deep Sync selected server'}
             </button>
-            <span className="text-xs text-gray-500">Select a server and time range to correlate Ubuntu, FleetManager, and Proxmox evidence.</span>
+            <span className="text-xs text-gray-500">Agent explains the current filtered evidence; it recommends checks but never executes remediation.</span>
           </div>
         </div>
+
+        {(agentExplanation || agentError) && (
+          <section className="bg-gray-800 border border-cyan-900 rounded-lg p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-white">Agent Error Explanation</h2>
+                <p className="text-xs text-gray-400 mt-1">Plain-English interpretation of the current filtered log evidence.</p>
+              </div>
+              {agentExplanation && (
+                <div className="text-right">
+                  <span className="text-xs rounded-md border border-cyan-800 bg-cyan-950/40 text-cyan-200 px-2 py-1 capitalize">{agentExplanation.confidence} confidence</span>
+                  <div className="text-[10px] text-gray-500 mt-2">via {agentExplanation.via}</div>
+                </div>
+              )}
+            </div>
+            {agentError && <div className="text-sm text-red-300 bg-red-950/30 border border-red-900 rounded-md p-3">{agentError}</div>}
+            {agentExplanation && (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="bg-gray-900 border border-gray-700 rounded-md p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-cyan-300 font-semibold mb-1">What it means</div>
+                    <p className="text-sm text-gray-200">{agentExplanation.plain_english}</p>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-700 rounded-md p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-cyan-300 font-semibold mb-1">Likely cause</div>
+                    <p className="text-sm text-gray-200">{agentExplanation.likely_cause}</p>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-2">Evidence used</div>
+                  <ul className="space-y-1 list-disc list-inside text-sm text-gray-300">{agentExplanation.evidence.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-green-300 font-semibold mb-2">Suggested remediation</div>
+                  <ol className="space-y-2 list-decimal list-inside text-sm text-gray-200">{agentExplanation.remediation_steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
+                </div>
+                {agentExplanation.caveats.length > 0 && (
+                  <div className="bg-yellow-950/20 border border-yellow-900 rounded-md p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-yellow-300 font-semibold mb-1">Verify before action</div>
+                    <ul className="space-y-1 list-disc list-inside text-xs text-yellow-100/80">{agentExplanation.caveats.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
 
         {amrEvents.length > 0 && (
           <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">

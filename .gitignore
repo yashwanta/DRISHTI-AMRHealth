@@ -40,9 +40,12 @@ build/
 # Local RDS data and private runtime config
 rds-discovery/
 data/rds-snapshots/
+data/discovery/
 data/reports/
 data/config/*
 !data/config/
 !data/config/api-connections.example.json
 data/keys/
+data/ssh/known_hosts
+deploy/standalone/.env
 backend.exe

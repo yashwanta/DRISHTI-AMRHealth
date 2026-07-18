@@ -4,7 +4,7 @@ import type {
   TimelinePoint, SyncJob, IncidentSummary, ActionRun, ActionRunRequest, LoginResponse,
   SiteOpsAnswer, SiteOpsHistoryItem, SiteOpsSuggestion, AppUser, AppUserRequest,
   PlantConfig, RdsLogEntry, RdsConnectionStatus, RdsLogFilters, RdsSourceDiscovery, RdsTestResult,
-  AgentJob, AgentStartRequest
+  AgentJob, AgentStartRequest, AgentLogExplanation
 } from '../types'
 
 const api = axios.create({ baseURL: '/api', withCredentials: true })
@@ -26,9 +26,13 @@ api.interceptors.response.use(
 export const login = (username: string, password: string) =>
   api.post<LoginResponse>('/auth/login', { username, password }).then(r => r.data)
 
-export const getMe = () => api.get<{ username: string; role: string }>('/auth/me').then(r => r.data)
+export const getMe = () => api.get<{ username: string; role: string; permissions: import('../types').AdminPermission[] }>('/auth/me').then(r => r.data)
 export const logout = () => api.post<{ status: string }>('/auth/logout').then(r => r.data)
-
+export const changePassword = (currentPassword: string, newPassword: string) =>
+  api.post<{ status: string }>('/auth/change-password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  }).then(r => r.data)
 // Servers
 export const getServers = () => api.get<Server[]>('/servers').then(r => r.data)
 export const createServer = (data: ServerRequest) => api.post<Server>('/servers', data).then(r => r.data)
@@ -66,6 +70,21 @@ export const getLogs = (filters: LogFilters = {}) => {
   )
   return api.get<LogEvent[]>('/logs', { params }).then(r => r.data)
 }
+
+export const explainLogErrors = (events: LogEvent[], context: string) =>
+  api.post<AgentLogExplanation>('/logs/agent-explain', {
+    context,
+    events: events.map(event => ({
+      timestamp: event.timestamp,
+      server_name: event.server_name,
+      event_type: event.event_type,
+      severity: event.severity,
+      source: event.source,
+      message: event.raw_line || event.message,
+      plain_english: event.plain_english || '',
+      recommended_action: event.recommended_action || '',
+    })),
+  }).then(response => response.data)
 
 export const getStats = () => api.get<DashboardStats>('/stats').then(r => r.data)
 export const getTimeline = () => api.get<TimelinePoint[]>('/timeline').then(r => r.data)
@@ -111,6 +130,7 @@ export const deleteUser = (id: number) => api.delete(`/users/${id}`)
 export const getRdsPlants = () => api.get<PlantConfig[]>('/rds/plants').then(r => r.data)
 export const getRdsConnectionStatus = (plant: string) => api.get<RdsConnectionStatus>(`/rds/status/${encodeURIComponent(plant)}`).then(r => r.data)
 export const testRdsConnection = (plant: string) => api.post<RdsTestResult>(`/rds/test/${encodeURIComponent(plant)}`).then(r => r.data)
+export const saveRdsCredentials = (plant: string, username: string, password: string) => api.put<{status:string}>(`/rds/credentials/${encodeURIComponent(plant)}`, { username, password }).then(r => r.data)
 export const discoverRdsSources = (plant: string) => api.post<RdsSourceDiscovery>(`/rds/discover/${encodeURIComponent(plant)}`).then(r => r.data)
 export const fetchRdsLogs = (plant: string) => api.post<{ event_count?: number; message?: string }>(`/rds/fetch/${encodeURIComponent(plant)}`).then(r => r.data)
 export const getRdsLogs = (filters: RdsLogFilters) => {
@@ -119,6 +139,21 @@ export const getRdsLogs = (filters: RdsLogFilters) => {
   )
   return api.get<RdsLogEntry[]>('/rds/logs', { params }).then(r => r.data)
 }
+
+export const explainRdsIncident = (entries: RdsLogEntry[], context: string) =>
+  api.post<AgentLogExplanation>('/logs/agent-explain', {
+    context,
+    events: entries.map(entry => ({
+      timestamp: entry.timestamp,
+      server_name: entry.plant,
+      event_type: `rds_${entry.category || 'unknown'}`,
+      severity: entry.severity,
+      source: entry.source_system,
+      message: entry.raw_log || entry.message,
+      plain_english: entry.message,
+      recommended_action: '',
+    })),
+  }).then(response => response.data)
 
 // Agent investigation
 export const startAgentJob = (req: AgentStartRequest) =>

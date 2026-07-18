@@ -40,7 +40,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 
 	authH := handlers.NewAuthHandler(db, cfg.AdminUsername, cfg.AdminPassword, cfg.SessionSecret)
 	serverH := handlers.NewServerHandler(db, cfg.EncryptionKey)
-	logH := handlers.NewLogHandler(db)
+	logH := handlers.NewLogHandler(db, cfg.OllamaURL, cfg.OllamaModel, cfg.LLMAPIKey)
 	syncH := handlers.NewSyncHandler(db, cfg.EncryptionKey)
 	actionH := handlers.NewActionHandler(db, cfg.EncryptionKey, cfg.AllowCustomCommands)
 	ragH := handlers.NewRAGHandler(db)
@@ -52,7 +52,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 			log.Printf("remediation: generate suggestions: %v", err)
 		}
 	})
-	rwH := handlers.NewRobowatchHandler(db)
+	rwH := handlers.NewRobowatchHandler(db, cfg.EncryptionKey)
 	amrH := handlers.NewAMRHandler(db, cfg.OllamaURL, cfg.OllamaModel, cfg.LLMAPIKey)
 
 	// Agent investigation orchestrator + config snapshotter.
@@ -107,6 +107,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 		r.Post("/auth/logout", authH.Logout)
 
 		r.Get("/logs", logH.List)
+		r.Post("/logs/agent-explain", logH.AgentExplain)
 		r.Get("/stats", logH.Stats)
 		r.Get("/timeline", logH.Timeline)
 		r.Get("/server-stats", logH.ServerStats)
@@ -129,6 +130,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 		r.Group(func(r chi.Router) {
 			r.Use(authH.Middleware)
 			r.Get("/auth/me", authH.Me)
+			r.Post("/auth/change-password", authH.ChangePassword)
 			r.Get("/servers", serverH.List)
 			r.Get("/agent/jobs/{job_id}", agentH.Get)
 			r.Get("/agent/robots", agentH.Robots)
@@ -140,11 +142,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 			r.Post("/rds/test/{plant}", rwH.TestConnection)
 			r.Post("/rds/discover/{plant}", rwH.DiscoverSources)
 			r.Post("/rds/fetch/{plant}", rwH.FetchLogs)
+			r.With(authH.AdminOnly).Put("/rds/credentials/{plant}", rwH.SaveCredentials)
 			r.Get("/incidents/summary", logH.IncidentSummary)
 			r.Get("/sync-history", logH.SyncHistory)
 
 			r.Group(func(r chi.Router) {
 				r.Use(authH.AdminOnly)
+				r.With(authH.PermissionOnly("users")).Get("/users", authH.ListUsers)
+				r.With(authH.PermissionOnly("users")).Post("/users", authH.CreateUser)
+				r.With(authH.PermissionOnly("users")).Put("/users/{id}", authH.UpdateUser)
 
 				r.Post("/servers", serverH.Create)
 				r.Put("/servers/{id}", serverH.Update)
