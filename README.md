@@ -1,86 +1,131 @@
-# DRISHTI - AMR Health
+# DRISHTI AMR Health
 
-Local Go + React dashboard for AMR health, RDS core imports, API connection management, log investigation, discovery, Wi-Fi heat maps, and plant configuration.
+DRISHTI AMR Health is a standalone Go and React application for monitoring AMR
+fleet health, reviewing RDS and system logs, investigating incidents, collecting
+Wi-Fi RSSI through AMR-to-TP-Link connections, and maintaining plant maps and
+scan history.
 
-## One-Command Install
+AMR Health runs independently from DRISHTI SiteOps. Its application container,
+PostgreSQL database, Podman network, persistent data, and credentials are kept
+separate from SiteOps.
 
-Windows 11:
+## Download for Windows
+
+Download the current offline Windows installer from the official release page:
+
+**[Download DRISHTI AMR Health v0.5.0](https://github.com/yashwanta/DRISHTI-AMRHealth/releases/tag/v0.5.0)**
+
+The Windows x64 EXE contains:
+
+- the compiled DRISHTI AMR Health application (no source tree);
+- PostgreSQL 16;
+- the official Podman for Windows 5.8.3 installer; and
+- scripts that initialize and start the local runtime.
+
+### Windows installation
+
+1. Download `DRISHTI-AMRHealth-Setup-0.5.0-Windows-x64.exe` and its `.sha256`
+   file from the release page.
+2. Verify the EXE checksum if required by your organization.
+3. Run the EXE as Administrator.
+4. Enter the Agent API key when prompted. The key is not embedded in the EXE.
+5. Allow a Windows restart if Podman needs to enable WSL 2 or virtualization
+   features.
+6. Open **[http://localhost:8099](http://localhost:8099)**.
+
+The current installer is not Authenticode-signed, so Windows SmartScreen may
+display `Unknown publisher`. Verify that the file came from the release page and
+that its SHA-256 checksum matches the attached checksum file.
+
+## Linux plant-server installation
+
+The source-free Linux package is intended for a server that users can reach on
+the plant network. Build the package from a trusted release workstation:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Install-DRISHTI-Windows.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\package-runtime-linux.ps1 -Version 0.5.0
 ```
 
-Linux:
+Copy the resulting `.tar.gz` to the plant server, extract it, and run:
 
 ```bash
-chmod +x ./install-drishti-linux.sh ./deploy/install/install-linux.sh
-./install-drishti-linux.sh
+sudo bash ./install-drishti-amr-health.sh \
+  --public-url http://SERVER-IP:8099 \
+  --open-firewall
 ```
 
-The installer verifies/installs Podman, builds the container image, creates local ignored data folders, starts `AMR-Health`, and verifies `http://localhost:8088/api/health`.
+Replace `SERVER-IP` with the server's real plant-network IP. Users then open
+`http://SERVER-IP:8099`; `localhost` only works from the server itself.
 
-## Project Layout
+## Application areas
 
-- `.github/workflows/` - GitHub Actions validation workflow
-- `backend/` - Go backend and local RDS proxy
-- `frontend/` - React + TypeScript UI
-- `deploy/install/` - Windows and Linux installer implementations
-- `deploy/compose/` - optional Podman Compose file
-- `tools/rds/` - local RDS snapshot helper scripts
-- `scripts/` - release/package automation
+- **Dashboard** — fleet and incident overview.
+- **Logs** — server, VM, application, network, and AMR/RDS evidence.
+- **RDS Logs** — RoboWatch/FleetManager connectivity and log collection.
+- **Agent** — rule and LLM-assisted incident explanation and remediation.
+- **AMR Fleet** — RDS-derived AMR state and connection health.
+- **AMR Logs** — robot-specific log evidence.
+- **WiFi Overview** — current Wi-Fi connection overview.
+- **WiFi Signal Strength** — live TP-Link RSSI, SNR, channel, and band data.
+- **Scans** — saved map snapshots and scan history.
+- **Reports** — operational reports.
 
-See `docs/project-structure.md` for the full layout. See `docs/operational-security-memory.md` for standing Fleet Manager, RDS, AMR, and DRISHTI security guidance.
+Administrative permissions can control access to User Management, Discovery,
+Heat Map, Servers, Sync Jobs, and Change Password.
 
-## Architecture
+## Runtime data and secrets
+
+The Windows runtime stores persistent files under:
 
 ```text
-React + TypeScript UI
-        |
-        v
-Go backend on localhost
-        |
-        +-- Local API connection config: data/config/api-connections.json
-        +-- Local RDS snapshots: data/rds-snapshots/
-        +-- Shelbyville / Springfield / Hopkinsville RDS core proxy
+C:\ProgramData\DRISHTI-AMRHealth
 ```
 
-Raw RDS pulls and local API connection config are ignored by Git. The committed file `data/config/api-connections.example.json` is only a sanitized template.
+The Agent API key is requested during installation and created as a Podman
+secret. It is not included in the Git repository, application image, release
+EXE, or `.env` file. A local computer administrator can still inspect local
+runtime resources; use a hosted LLM proxy when complete key isolation is
+required.
 
+Plant API configuration, SSH known hosts, private keys, RDS snapshots, and
+PostgreSQL data are also local runtime data and must not be committed to Git.
 
-## Confidence Level Scans
+## Wi-Fi RSSI connection model
 
-Use the Heatmap and Scans pages to record AMR confidence along the plant map without sending motion commands.
-
-- Heatmap markers and saved scan overlays use the same confidence thresholds: `75%+` green, `51-74%` yellow, and `50% and below` red.
-- `Start Scan Recording` pulls RDS core on a timer, saves AMR confidence samples locally, and pulls the plant scene map if it is missing.
-- With `Stop at home` enabled, the recorder stays active until the selected AMR leaves its home location and then returns.
-- `Save Scan Point` stores the current plant confidence snapshot manually.
-- The `Scans` page lists saved scan maps by plant and time, lets you open a previous scan on the Heatmap page, and lets you delete one scan map or all scans visible in the current filter.
-- Saved scan history is stored in browser `localStorage` on localhost and is pruned to a rolling 5-day window.
-## Run With Podman
-
-```powershell
-podman build -t drishti-amr-health .
-podman rm -f AMR-Health
-podman run -d --name AMR-Health -p 8088:8090 -v ${PWD}\data:/app/data drishti-amr-health
-```
-
-Open:
+For TP-Link RSSI, DRISHTI connects to an AMR's plant-network address over SSH
+(commonly port `8022`). From that AMR connection it reaches the TP-Link at its
+fixed robot-local address:
 
 ```text
-http://localhost:8088
+http://192.168.1.254
 ```
 
-## Development
+Do not replace this value with the AMR plant-network IP. Each AMR provides the
+route to its own TP-Link device. TP-Link sessions are cached per AMR, and lockout
+responses are backed off before authentication is attempted again.
 
-Backend:
+## Developer setup
+
+End users do not need Git, Go, Node.js, or npm. These instructions are only for
+developers working from the repository.
+
+Build and start the standalone Podman deployment on port `8099`:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\standalone\start.ps1 -Build
+```
+
+Open **[http://localhost:8099](http://localhost:8099)**.
+
+Run backend tests:
+
+```powershell
+cd backend
 $env:GOCACHE = "$PWD\.gocache"
-go run ./backend
+go test ./...
 ```
 
-Frontend:
+Run the frontend development server:
 
 ```powershell
 cd frontend
@@ -88,15 +133,23 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-## Local API Routes
+## Project layout
 
-```text
-GET  /api/health
-GET  /api/connections
-POST /api/connections
-PUT  /api/connections
-GET  /api/plants/{plant}/rds/core?save=1
-GET  /api/plants/{plant}/rds/scene?save=1
-```
+- `backend/` — Go API, authentication, RDS proxy, SSH, Wi-Fi, and Agent logic.
+- `frontend/` — React and TypeScript application.
+- `deploy/standalone/` — independent AMR Health development deployment.
+- `deploy/runtime-windows/` — source-free Windows runtime scripts.
+- `deploy/runtime-linux/` — source-free Linux plant-server runtime scripts.
+- `deploy/windows-exe/` — offline Windows EXE definition.
+- `scripts/` — release and installer build automation.
+- `data/config/api-connections.example.json` — sanitized API configuration
+  example; never place real passwords in this file.
 
-Use `Admin > RDS API Connections` to manage plant URLs locally. Use `Admin > RDS Core Import` to pull live RDS core data through Go or import a saved JSON response.
+See [INSTALL.md](INSTALL.md) for packaging details and advanced installation
+options.
+
+## Repository
+
+Source and releases: **[yashwanta/DRISHTI-AMRHealth](https://github.com/yashwanta/DRISHTI-AMRHealth)**
+
+Contributors are listed in [CONTRIBUTORS.md](CONTRIBUTORS.md).
