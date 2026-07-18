@@ -1,0 +1,61 @@
+name: drishti-amr-health
+
+services:
+  database:
+    image: docker.io/library/postgres:16-alpine
+    container_name: AMR-Health-DB
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - amr_health_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - amr_health
+
+  amr-health:
+    image: localhost/drishti-amr-health:latest
+    build:
+      context: ../..
+      dockerfile: Containerfile
+    container_name: AMR-Health
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "${AMR_HEALTH_PORT:-8099}:8090"
+    environment:
+      PORT: "8090"
+      # Keep this as a complete URL so passwords containing @, #, or : can be
+      # URL-encoded safely in the private .env file.
+      DATABASE_URL: ${DATABASE_URL}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SESSION_SECRET: ${SESSION_SECRET}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8099}
+      DRISHTI_STATIC_DIR: /app/frontend/dist
+      DRISHTI_API_CONFIG: /app/data/config/api-connections.json
+      DRISHTI_DISCOVERY_RDS_BASE_URL: ${DRISHTI_DISCOVERY_RDS_BASE_URL:-}
+      DRISHTI_DISCOVERY_RDS_SESSION_TOKEN: ${DRISHTI_DISCOVERY_RDS_SESSION_TOKEN:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://localhost:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    volumes:
+      - ../../data:/app/data
+      - ../../data/ssh/known_hosts:/app/known_hosts:ro
+    networks:
+      - amr_health
+
+volumes:
+  amr_health_pgdata:
+    name: drishti-amr-health_pgdata
+
+networks:
+  amr_health:
+    name: drishti-amr-health_default

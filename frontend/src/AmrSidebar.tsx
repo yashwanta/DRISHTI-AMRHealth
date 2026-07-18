@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Server, RefreshCw, LogIn, LogOut } from 'lucide-react'
+import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Server, RefreshCw, LogIn, LogOut, Search, Map, ScanLine, BarChart3, KeyRound, Signal, Users } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useAuth } from './auth'
 
@@ -10,12 +10,19 @@ const nav = [
   { to: '/agent',       label: 'Agent',         Icon: BrainCircuit },
   { to: '/agent/fleet', label: 'AMR Fleet',     Icon: Activity },
   { to: '/amr-logs',    label: 'AMR Logs',      Icon: ScrollText },
-  { to: '/amr/',        label: 'WiFi / Maps',   Icon: Wifi },
+  { to: '/amr/',          label: 'WiFi Overview', Icon: Wifi },
+  { to: '/amr/wifi-signal', label: 'WiFi Signal Strength', Icon: Signal },
+  { to: '/amr/scans',     label: 'Scans',         Icon: ScanLine },
+  { to: '/amr/reports',   label: 'Reports',       Icon: BarChart3 },
 ]
 
 const adminNav = [
-  { to: '/servers', label: 'Servers',   Icon: Server },
-  { to: '/sync',    label: 'Sync Jobs', Icon: RefreshCw },
+  { to: '/users', label: 'User Management', Icon: Users, permission: 'users' as const },
+  { to: '/amr/discovery', label: 'Discovery', Icon: Search, permission: 'discovery' as const },
+  { to: '/amr/heatmap', label: 'Heat Map', Icon: Map, permission: 'heatmap' as const },
+  { to: '/servers', label: 'Servers', Icon: Server, permission: 'servers' as const },
+  { to: '/sync', label: 'Sync Jobs', Icon: RefreshCw, permission: 'sync' as const },
+  { to: '/change-password', label: 'Change Password', Icon: KeyRound, permission: 'change_password' as const },
 ]
 
 export function AmrSidebar() {
@@ -36,7 +43,7 @@ export function AmrSidebar() {
           <NavLink
             key={to}
             to={to}
-            end={to === '/' || to === '/agent'}
+            end={to === '/' || to === '/agent' || to === '/amr/'}
             className={({ isActive }) =>
               clsx(
                 'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
@@ -50,8 +57,8 @@ export function AmrSidebar() {
         ))}
         <div className="pt-4 mt-4 border-t border-gray-800">
           <div className="px-3 pb-2 text-[11px] uppercase tracking-wider text-gray-600">Admin</div>
-          {auth.isAuthenticated ? (
-            adminNav.map(({ to, label, Icon }) => (
+          {auth.canAdmin ? (
+            adminNav.filter(item => auth.hasPermission(item.permission)).map(({ to, label, Icon }) => (
               <NavLink
                 key={to}
                 to={to}

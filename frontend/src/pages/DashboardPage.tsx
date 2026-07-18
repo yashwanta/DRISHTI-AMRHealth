@@ -127,8 +127,8 @@ export default function DashboardPage() {
     <div className="flex flex-col h-full bg-gray-900 text-gray-100">
       <div className="flex items-center justify-between px-6 py-4 bg-gray-900 border-b border-gray-700">
         <div>
-          <h1 className="text-base font-semibold text-white">DRISHTI SiteOps</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Operations overview across servers, robots, RDS, WarLink, Proxmox, logs, and automation</p>
+          <h1 className="text-base font-semibold text-white">DRISHTI AMR Health</h1>
+          <p className="text-xs text-gray-400 mt-0.5">AMR fleet overview across robots, RDS, Wi-Fi, logs, and diagnostics</p>
         </div>
         <button onClick={handleSync} disabled={syncing} className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white border border-gray-600 transition-colors disabled:opacity-50">
           <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />

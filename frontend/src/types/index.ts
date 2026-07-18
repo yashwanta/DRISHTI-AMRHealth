@@ -210,7 +210,20 @@ export interface AppUser {
   status: 'active' | 'disabled'
   created_at: string
   updated_at: string
+  permissions: AdminPermission[]
 }
+
+export interface AgentLogExplanation {
+  plain_english: string
+  likely_cause: string
+  evidence: string[]
+  remediation_steps: string[]
+  confidence: 'high' | 'medium' | 'low'
+  caveats: string[]
+  via: string
+}
+
+export type AdminPermission = 'users' | 'discovery' | 'heatmap' | 'servers' | 'sync' | 'change_password'
 
 export interface AppUserRequest {
   username?: string
@@ -218,6 +231,7 @@ export interface AppUserRequest {
   role: UserRole
   location?: string
   status?: 'active' | 'disabled'
+  permissions?: AdminPermission[]
 }
 
 export type AutomationAction =

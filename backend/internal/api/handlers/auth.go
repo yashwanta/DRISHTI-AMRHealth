@@ -36,6 +36,11 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
 type loginResponse struct {
 	Token     string `json:"token"`
 	Username  string `json:"username"`
@@ -117,7 +122,54 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role, _ := roleFromRequest(r)
-	jsonOK(w, map[string]string{"username": username, "role": role})
+	jsonOK(w, map[string]any{"username": username, "role": role, "permissions": permissionsFromRequest(r)})
+}
+
+func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	username, ok := usernameFromRequest(r)
+	if !ok {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if _, valid := h.validateLogin(r, username, req.CurrentPassword); !valid {
+		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
+		return
+	}
+	if err := validatePasswordComplexity(req.NewPassword); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.CurrentPassword), []byte(req.NewPassword)) == 1 {
+		jsonError(w, "new password must be different from the current password", http.StatusBadRequest)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		jsonError(w, "could not secure the new password", http.StatusInternalServerError)
+		return
+	}
+	role, _ := roleFromRequest(r)
+	_, err = h.db.Exec(r.Context(), `
+		INSERT INTO app_users (username, password_hash, role, status, updated_at)
+		VALUES ($1, $2, $3, 'active', NOW())
+		ON CONFLICT (username) DO UPDATE SET
+			password_hash=EXCLUDED.password_hash,
+			status='active',
+			updated_at=NOW()
+	`, username, string(hash), role)
+	if err != nil {
+		jsonError(w, "could not update password", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "password changed"})
 }
 
 func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
@@ -140,9 +192,52 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 			jsonError(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+		var currentRole, status string
+		var rawPermissions []byte
+		err := h.db.QueryRow(r.Context(), `SELECT role, status, permissions FROM app_users WHERE username=$1`, username).Scan(&currentRole, &status, &rawPermissions)
+		permissions := []string{}
+		if err == nil {
+			if status != "active" {
+				jsonError(w, "account is disabled", http.StatusUnauthorized)
+				return
+			}
+			role = currentRole
+			if len(rawPermissions) > 0 {
+				_ = json.Unmarshal(rawPermissions, &permissions)
+			}
+		} else if err != pgx.ErrNoRows || username != h.username {
+			jsonError(w, "account is unavailable", http.StatusUnauthorized)
+			return
+		}
+		if role == "Super Admin" {
+			permissions = allAdminPermissions()
+		}
 
-		next.ServeHTTP(w, withUser(r, username, role))
+		next.ServeHTTP(w, withPermissions(withUser(r, username, role), permissions))
 	})
+}
+
+func (h *AuthHandler) PermissionOnly(permission string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			role, _ := roleFromRequest(r)
+			if role == "Super Admin" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			for _, candidate := range permissionsFromRequest(r) {
+				if candidate == permission {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			jsonError(w, "permission required: "+permission, http.StatusForbidden)
+		})
+	}
+}
+
+func allAdminPermissions() []string {
+	return []string{"users", "discovery", "heatmap", "servers", "sync", "change_password"}
 }
 
 func (h *AuthHandler) AdminOnly(next http.Handler) http.Handler {
@@ -159,8 +254,11 @@ func (h *AuthHandler) AdminOnly(next http.Handler) http.Handler {
 func (h *AuthHandler) validateLogin(r *http.Request, username, password string) (string, bool) {
 	var hash, role, status string
 	err := h.db.QueryRow(r.Context(), `SELECT password_hash, role, status FROM app_users WHERE username=$1`, username).Scan(&hash, &role, &status)
-	if err == nil && status == "active" && bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil {
-		return role, true
+	if err == nil {
+		if status == "active" && bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil {
+			return role, true
+		}
+		return "", false
 	}
 	if err != nil && err != pgx.ErrNoRows {
 		return "", false
@@ -172,6 +270,26 @@ func (h *AuthHandler) validateLogin(r *http.Request, username, password string) 
 		return "Super Admin", true
 	}
 	return "", false
+}
+
+func validatePasswordComplexity(password string) error {
+	if len(password) < 12 {
+		return fmt.Errorf("password must be at least 12 characters")
+	}
+	hasLetter := false
+	hasNumber := false
+	for _, char := range password {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z':
+			hasLetter = true
+		case char >= '0' && char <= '9':
+			hasNumber = true
+		}
+	}
+	if !hasLetter || !hasNumber {
+		return fmt.Errorf("password must contain at least one letter and one number")
+	}
+	return nil
 }
 
 func (h *AuthHandler) sign(username, role string, expires time.Time) string {

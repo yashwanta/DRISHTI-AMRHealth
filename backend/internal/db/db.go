@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS app_users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_users_role ON app_users(role);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions JSONB;
 
 CREATE TABLE IF NOT EXISTS rds_log_events (
     id                 BIGSERIAL PRIMARY KEY,
@@ -292,6 +293,13 @@ CREATE TABLE IF NOT EXISTS rds_connection_status (
     logs_pulled          INT NOT NULL DEFAULT 0,
     last_error           TEXT,
     available_sources    TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS rds_credentials (
+    plant TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    password_enc TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS agent_jobs (

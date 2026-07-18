@@ -35,3 +35,24 @@ func TestLoginClientIPPrefersXRealIP(t *testing.T) {
 		t.Fatalf("loginClientIP = %q, want %q", got, "198.51.100.7")
 	}
 }
+
+func TestValidatePasswordComplexity(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		wantErr  bool
+	}{
+		{name: "valid", password: "FleetHealth2026", wantErr: false},
+		{name: "too short", password: "Health2026", wantErr: true},
+		{name: "no number", password: "FleetHealthOnly", wantErr: true},
+		{name: "no letter", password: "123456789012", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePasswordComplexity(tt.password)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validatePasswordComplexity() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
