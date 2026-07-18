@@ -40,10 +40,27 @@ func Load() *Config {
 		AllowCustomCommands:     getEnvBool("ALLOW_CUSTOM_COMMANDS", false),
 		OllamaURL:               getEnv("OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:             getEnv("OLLAMA_MODEL", "llama3"),
-		LLMAPIKey:               getEnv("LLM_API_KEY", ""),
+		LLMAPIKey:               getEnvOrFile("LLM_API_KEY", "LLM_API_KEY_FILE", ""),
 		AgentSnapshotMinutes:    getEnvInt("AGENT_SNAPSHOT_MINUTES", 15),
 		AllowedOrigins:          getEnvList("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5189"),
 	}
+}
+
+// getEnvOrFile supports container secret mounts without putting credentials in
+// the image or the container environment. A direct environment value remains
+// available for development and existing deployments.
+func getEnvOrFile(key, fileKey, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	if path := strings.TrimSpace(os.Getenv(fileKey)); path != "" {
+		if raw, err := os.ReadFile(path); err == nil {
+			if value := strings.TrimSpace(string(raw)); value != "" {
+				return value
+			}
+		}
+	}
+	return fallback
 }
 
 func getEnv(key, fallback string) string {

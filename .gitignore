@@ -33,6 +33,9 @@ build/
 
 # Local packaging output
 .package/
+.runtime-package/
+.runtime-package-linux/
+.windows-exe-package/
 *.zip
 *.tar
 *.tar.gz
