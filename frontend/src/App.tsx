@@ -16,6 +16,7 @@ import ServersPage from "./pages/ServersPage"
 import SyncPage from "./pages/SyncPage"
 import ChangePasswordPage from "./pages/ChangePasswordPage"
 import UserManagementPage from "./pages/UserManagementPage"
+import WifiHeatmapAdminPage from "./pages/WifiHeatmapAdminPage"
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1 } },
@@ -52,6 +53,7 @@ function SiteOpsShell() {
           <Route path="/amr-logs" element={<AMRLogsPage />} />
           <Route path="/amr/discovery" element={<AdminRoute permission="discovery"><AmrHealthApp embedded /></AdminRoute>} />
           <Route path="/amr/heatmap" element={<AdminRoute permission="heatmap"><AmrHealthApp embedded /></AdminRoute>} />
+          <Route path="/admin/wifi-heatmap" element={<AdminRoute permission="heatmap"><WifiHeatmapAdminPage /></AdminRoute>} />
           <Route path="/amr/*" element={<AmrHealthApp embedded />} />
           <Route path="/servers" element={<AdminRoute permission="servers"><ServersPage /></AdminRoute>} />
           <Route path="/sync" element={<AdminRoute permission="sync"><SyncPage /></AdminRoute>} />
