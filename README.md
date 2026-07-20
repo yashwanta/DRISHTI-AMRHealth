@@ -13,7 +13,7 @@ separate from SiteOps.
 
 Download the current offline Windows installer from the official release page:
 
-**[Download DRISHTI AMR Health v0.5.0](https://github.com/yashwanta/DRISHTI-AMRHealth/releases/tag/v0.5.0)**
+**[Download DRISHTI AMR Health v0.6.0](https://github.com/yashwanta/DRISHTI-AMRHealth/releases/tag/v0.6.0)**
 
 The Windows x64 EXE contains:
 
@@ -24,7 +24,7 @@ The Windows x64 EXE contains:
 
 ### Windows installation
 
-1. Download `DRISHTI-AMRHealth-Setup-0.5.0-Windows-x64.exe` and its `.sha256`
+1. Download `DRISHTI-AMRHealth-Setup-0.6.0-Windows-x64.exe` and its `.sha256`
    file from the release page.
 2. Verify the EXE checksum if required by your organization.
 3. Run the EXE as Administrator.
@@ -43,7 +43,7 @@ The source-free Linux package is intended for a server that users can reach on
 the plant network. Build the package from a trusted release workstation:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-runtime-linux.ps1 -Version 0.5.0
+powershell -ExecutionPolicy Bypass -File .\scripts\package-runtime-linux.ps1 -Version 0.6.0
 ```
 
 Copy the resulting `.tar.gz` to the plant server, extract it, and run:

@@ -20,6 +20,7 @@ const adminNav = [
   { to: '/users', label: 'User Management', Icon: Users, permission: 'users' as const },
   { to: '/amr/discovery', label: 'Discovery', Icon: Search, permission: 'discovery' as const },
   { to: '/amr/heatmap', label: 'Heat Map', Icon: Map, permission: 'heatmap' as const },
+  { to: '/admin/wifi-heatmap', label: 'WiFi Survey', Icon: ScanLine, permission: 'heatmap' as const },
   { to: '/servers', label: 'Servers', Icon: Server, permission: 'servers' as const },
   { to: '/sync', label: 'Sync Jobs', Icon: RefreshCw, permission: 'sync' as const },
   { to: '/change-password', label: 'Change Password', Icon: KeyRound, permission: 'change_password' as const },

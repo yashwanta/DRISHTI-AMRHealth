@@ -45,6 +45,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 	actionH := handlers.NewActionHandler(db, cfg.EncryptionKey, cfg.AllowCustomCommands)
 	ragH := handlers.NewRAGHandler(db)
 	remediationH := handlers.NewRemediationHandler(db)
+	heatmapH := handlers.NewHeatmapHandler(db)
 
 	// After each scheduled sync, scan for new remediation suggestions.
 	syncH.OnSyncComplete(func(ctx context.Context) {
@@ -151,6 +152,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 				r.With(authH.PermissionOnly("users")).Get("/users", authH.ListUsers)
 				r.With(authH.PermissionOnly("users")).Post("/users", authH.CreateUser)
 				r.With(authH.PermissionOnly("users")).Put("/users/{id}", authH.UpdateUser)
+				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/points", heatmapH.SavePoint)
+				r.With(authH.PermissionOnly("heatmap")).Get("/wifi-heatmap/query", heatmapH.Query)
+				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/sessions", heatmapH.StartSession)
+				r.With(authH.PermissionOnly("heatmap")).Get("/wifi-heatmap/sessions", heatmapH.Sessions)
+				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/sessions/{id}/stop", heatmapH.StopSession)
 
 				r.Post("/servers", serverH.Create)
 				r.Put("/servers/{id}", serverH.Update)

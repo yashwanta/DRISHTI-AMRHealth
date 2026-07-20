@@ -121,10 +121,10 @@ source-free DRISHTI and PostgreSQL images. A target user does not need Git,
 Go, Node.js, npm, or a separate Podman download.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-exe.ps1 -Version 0.5.0
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-exe.ps1 -Version 0.6.0
 ```
 
-Run the resulting `DRISHTI-AMRHealth-Setup-0.5.0-Windows-x64.exe` as an
+Run the resulting `DRISHTI-AMRHealth-Setup-0.6.0-Windows-x64.exe` as an
 administrator. Windows virtualization and WSL 2 support must be available;
 Podman may request a restart when Windows first enables those platform
 features. The Agent API key is requested during runtime initialization and is

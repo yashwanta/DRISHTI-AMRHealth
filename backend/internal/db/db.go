@@ -362,6 +362,64 @@ CREATE INDEX IF NOT EXISTS idx_rsr_server ON robot_status_records(server_id);
 -- Dedup key: one transition per (server, uuid, started_on). Re-syncs upsert.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_rsr_server_uuid_started ON robot_status_records(server_id, uuid, started_on);
 
+-- Durable, synchronized Wi-Fi survey data. Map identifiers intentionally remain
+-- text because current RDS deployments expose MD5/version identifiers rather
+-- than a shared numeric map catalogue.
+CREATE TABLE IF NOT EXISTS wifi_scan_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    plant_id TEXT NOT NULL,
+    map_id TEXT NOT NULL,
+    map_version TEXT NOT NULL,
+    amr_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    moving_interval_seconds INT NOT NULL DEFAULT 2,
+    stationary_interval_seconds INT NOT NULL DEFAULT 10,
+    timestamp_tolerance_seconds INT NOT NULL DEFAULT 15,
+    sample_count BIGINT NOT NULL DEFAULT 0,
+    started_by TEXT NOT NULL DEFAULT '',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    stopped_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_wifi_scan_sessions_scope ON wifi_scan_sessions(plant_id, map_id, map_version, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS wifi_scan_points (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT REFERENCES wifi_scan_sessions(id) ON DELETE SET NULL,
+    plant_id TEXT NOT NULL,
+    map_id TEXT NOT NULL,
+    map_version TEXT NOT NULL,
+    amr_id TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+    x DOUBLE PRECISION NOT NULL,
+    y DOUBLE PRECISION NOT NULL,
+    heading DOUBLE PRECISION,
+    moving BOOLEAN NOT NULL DEFAULT FALSE,
+    speed DOUBLE PRECISION,
+    rssi_dbm INT NOT NULL,
+    snr_db DOUBLE PRECISION,
+    noise_dbm DOUBLE PRECISION,
+    ssid TEXT,
+    bssid TEXT NOT NULL,
+    previous_bssid TEXT,
+    channel INT NOT NULL,
+    frequency_mhz INT,
+    band TEXT NOT NULL,
+    connected BOOLEAN NOT NULL DEFAULT TRUE,
+    disconnect_event BOOLEAN NOT NULL DEFAULT FALSE,
+    roam_event BOOLEAN NOT NULL DEFAULT FALSE,
+    latency_ms DOUBLE PRECISION,
+    packet_loss_percent DOUBLE PRECISION,
+    source_id TEXT NOT NULL,
+    position_timestamp TIMESTAMPTZ NOT NULL,
+    wifi_timestamp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fingerprint TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wifi_scan_points_scope_time ON wifi_scan_points(plant_id, map_id, map_version, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_wifi_scan_points_amr_time ON wifi_scan_points(amr_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_wifi_scan_points_bssid_time ON wifi_scan_points(bssid, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wifi_scan_points_fingerprint ON wifi_scan_points(fingerprint);
+
 -- Retention: prune raw event tables older than 30 days to keep the DB bounded.
 -- Runs on every backend startup (idempotent). Small metadata tables
 -- (agent_jobs, sync_jobs, action_runs, rag_history) are kept indefinitely.

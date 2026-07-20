@@ -267,3 +267,15 @@ export const getAMRSummary = (plant?: string, robot?: string, range?: TimeRange)
       ...(range?.to ? { to: range.to } : {}),
     },
   }).then(r => r.data)
+
+export interface WifiHeatmapPointInput {
+  session_id?: number; plant_id: string; source_plant: string; map_id: string; map_version: string;
+  amr_id: string; wifi_amr_id: string; timestamp: string; x: number; y: number; heading?: number;
+  moving: boolean; speed?: number; rssi_dbm: number; snr_db?: number; ssid?: string; bssid: string;
+  channel: number; frequency_mhz?: number; band: string; connected: boolean; latency_ms?: number;
+  source_id: string; position_timestamp: string; wifi_timestamp: string;
+}
+export const saveWifiHeatmapPoint = (point: WifiHeatmapPointInput, toleranceSeconds = 15) => api.post('/wifi-heatmap/points', point, { params: { tolerance_seconds: toleranceSeconds } }).then(r => r.data)
+export const startWifiHeatmapSession = (data: Record<string, unknown>) => api.post<{id:number;status:string;started_at:string}>('/wifi-heatmap/sessions', data).then(r => r.data)
+export const stopWifiHeatmapSession = (id: number) => api.post(`/wifi-heatmap/sessions/${id}/stop`).then(r => r.data)
+export const queryWifiHeatmap = (params: Record<string, string | number>) => api.get('/wifi-heatmap/query', { params }).then(r => r.data)
