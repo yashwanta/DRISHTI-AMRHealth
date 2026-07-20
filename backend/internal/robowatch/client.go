@@ -536,6 +536,12 @@ func (c *Client) CoreRobotStatus() (map[string]RobotCoreStatus, error) {
 	if !ok {
 		return nil, fmt.Errorf("robotsStatus response unexpected: %T", resp)
 	}
+	// Springfield (and some other RDS builds) wraps the actual payload in the
+	// standard {code,msg,data:{...}} envelope. Older builds return the payload
+	// directly. Accept both forms so the full robot roster remains authoritative.
+	if data, wrapped := env["data"].(map[string]any); wrapped {
+		env = data
+	}
 	seenAt := time.Now().UTC()
 	if rawSeen, ok := env["create_on"].(string); ok && rawSeen != "" {
 		if parsed, err := time.Parse(time.RFC3339, rawSeen); err == nil {

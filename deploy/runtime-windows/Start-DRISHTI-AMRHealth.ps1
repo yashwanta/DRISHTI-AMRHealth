@@ -21,20 +21,36 @@ function Convert-ToPodmanPath([string]$path) {
     return "/mnt/$drive$rest"
 }
 
+function Test-PodmanResource([string[]]$Arguments) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & podman @Arguments *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 $settings = Import-Clixml -LiteralPath $settingsPath
 $dbPassword = ConvertFrom-ProtectedString $settings.DatabasePassword
 $databaseURL = "postgres://amr:$([Uri]::EscapeDataString($dbPassword))@database:5432/amrdashboard?sslmode=disable"
 $dataPath = Convert-ToPodmanPath (Join-Path $InstallRoot 'data')
 $knownHosts = Convert-ToPodmanPath (Join-Path $InstallRoot 'data\ssh\known_hosts')
 
-podman machine start *> $null
-podman network inspect drishti-amr-health-runtime *> $null
-if ($LASTEXITCODE -ne 0) { podman network create drishti-amr-health-runtime | Out-Null }
-podman volume inspect drishti-amr-health-runtime-db *> $null
-if ($LASTEXITCODE -ne 0) { podman volume create drishti-amr-health-runtime-db | Out-Null }
+$machines = podman machine list --format json 2>$null | ConvertFrom-Json
+if (-not $machines) { podman machine init }
+$machines = podman machine list --format json 2>$null | ConvertFrom-Json
+if (-not ($machines | Where-Object { $_.Running -eq $true })) { podman machine start | Out-Host }
+podman info | Out-Null
+if (-not (Test-PodmanResource @('network','inspect','drishti-amr-health-runtime'))) {
+    podman network create drishti-amr-health-runtime | Out-Null
+}
+if (-not (Test-PodmanResource @('volume','inspect','drishti-amr-health-runtime-db'))) {
+    podman volume create drishti-amr-health-runtime-db | Out-Null
+}
 
-podman container exists AMR-Health-DB
-if ($LASTEXITCODE -ne 0) {
+if (-not (Test-PodmanResource @('container','exists','AMR-Health-DB'))) {
     podman run -d --name AMR-Health-DB `
         --network drishti-amr-health-runtime --network-alias database `
         --restart unless-stopped `
@@ -46,8 +62,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $secretArgs = @()
-podman secret inspect drishti_llm_api_key *> $null
-if ($LASTEXITCODE -eq 0) {
+if (Test-PodmanResource @('secret','inspect','drishti_llm_api_key')) {
     $secretArgs = @('--secret', 'drishti_llm_api_key,target=llm_api_key')
 }
 

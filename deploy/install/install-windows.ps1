@@ -16,6 +16,7 @@ param(
   [int]$HostPort = 8088,
   [string]$ImageName = "drishti-amr-health",
   [string]$ContainerName = "AMR-Health",
+  [string]$DatabaseContainerName = "AMR-Health-DB",
   [switch]$SkipPodmanInstall
 )
 
@@ -81,18 +82,127 @@ Invoke-Step "Preparing local data config" {
 
 Invoke-Step "Building container image" {
   podman build -t $ImageName .
+  if ($LASTEXITCODE -ne 0) { throw "Container image build failed." }
 }
 
-Invoke-Step "Replacing running container" {
-  podman rm -f $ContainerName 2>$null | Out-Null
-  $dataPath = (Resolve-Path -LiteralPath "data").Path
-  podman run -d --name $ContainerName -p "${HostPort}:8090" -v "${dataPath}:/app/data" --restart unless-stopped $ImageName
+function Test-PodmanResource([string[]]$Arguments) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & podman @Arguments *> $null
+    return $LASTEXITCODE -eq 0
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+}
+
+function New-RandomSecret([int]$Bytes = 32) {
+  $buffer = [byte[]]::new($Bytes)
+  $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $generator.GetBytes($buffer) }
+  finally { $generator.Dispose() }
+  return [Convert]::ToBase64String($buffer)
+}
+
+function ConvertFrom-ProtectedString([Security.SecureString]$Value) {
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+  try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+
+function Convert-ToPodmanPath([string]$Path) {
+  $full = [IO.Path]::GetFullPath($Path)
+  $drive = $full.Substring(0, 1).ToLowerInvariant()
+  $rest = $full.Substring(2).Replace('\', '/')
+  return "/mnt/$drive$rest"
+}
+
+$settingsPath = Join-Path $root "data\config\runtime-settings.clixml"
+$networkName = "drishti-amr-health-source"
+$volumeName = "drishti-amr-health-source-db"
+
+Invoke-Step "Preparing runtime settings" {
+  if (Test-Path -LiteralPath $settingsPath) {
+    $script:settings = Import-Clixml -LiteralPath $settingsPath
+    Write-Host "Keeping existing encrypted runtime settings."
+  } else {
+    $script:settings = [pscustomobject]@{
+      EncryptionKey = New-RandomSecret 32
+      SessionSecret = New-RandomSecret 48
+      DatabasePassword = ConvertTo-SecureString (New-RandomSecret 32) -AsPlainText -Force
+    }
+    $script:settings | Export-Clixml -LiteralPath $settingsPath -Force
+    Write-Host "Created encrypted runtime settings for the current Windows user."
+  }
+}
+
+Invoke-Step "Preparing PostgreSQL" {
+  $dbPassword = ConvertFrom-ProtectedString $settings.DatabasePassword
+  if (-not (Test-PodmanResource @('network','inspect',$networkName))) {
+    podman network create $networkName | Out-Null
+  }
+  if (-not (Test-PodmanResource @('volume','inspect',$volumeName))) {
+    podman volume create $volumeName | Out-Null
+  }
+
+  if (Test-PodmanResource @('container','exists',$DatabaseContainerName)) {
+    podman start $DatabaseContainerName *> $null
+  } else {
+    $dbArgs = @(
+      'run','-d','--name',$DatabaseContainerName,
+      '--network',$networkName,'--network-alias','database',
+      '--restart','unless-stopped',
+      '-e','POSTGRES_USER=amr','-e',("POSTGRES_PASSWORD={0}" -f $dbPassword),'-e','POSTGRES_DB=amrdashboard',
+      '-v',("{0}:/var/lib/postgresql/data" -f $volumeName),
+      'docker.io/library/postgres:16-alpine'
+    )
+    & podman @dbArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "PostgreSQL container failed to start." }
+  }
+}
+
+Invoke-Step "Replacing running application container" {
+  $dbPassword = ConvertFrom-ProtectedString $settings.DatabasePassword
+  $databaseURL = "postgres://amr:$([Uri]::EscapeDataString($dbPassword))@database:5432/amrdashboard?sslmode=disable"
+  $dataPath = Convert-ToPodmanPath (Resolve-Path -LiteralPath "data").Path
+  $runArgs = @(
+    'run','-d','--replace','--name',$ContainerName,
+    '--network',$networkName,'--restart','unless-stopped',
+    '-p',("{0}:8090" -f $HostPort),
+    '-v',("{0}:/app/data" -f $dataPath),
+    '-e','PORT=8090','-e','DRISHTI_STATIC_DIR=/app/frontend/dist',
+    '-e','DRISHTI_API_CONFIG=/app/data/config/api-connections.json',
+    '-e',("DATABASE_URL={0}" -f $databaseURL),
+    '-e',("ENCRYPTION_KEY={0}" -f $settings.EncryptionKey),
+    '-e',("SESSION_SECRET={0}" -f $settings.SessionSecret),
+    '-e',("ALLOWED_ORIGINS=http://localhost:{0}" -f $HostPort),
+    $ImageName
+  )
+  & podman @runArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "AMR Health container failed to start. Check whether port $HostPort is already in use."
+  }
 }
 
 Invoke-Step "Verifying app" {
-  Start-Sleep -Seconds 3
-  $health = Invoke-WebRequest -Uri "http://localhost:$HostPort/api/health" -UseBasicParsing -TimeoutSec 15
-  if ($health.StatusCode -ne 200) { throw "Health check failed with status $($health.StatusCode)." }
-  Write-Host "DRISHTI - AMR Health is running: http://localhost:$HostPort" -ForegroundColor Green
-  Write-Host "Use Admin > RDS API Connections to add real plant RDS URLs."
+  for ($attempt = 1; $attempt -le 30; $attempt++) {
+    Start-Sleep -Seconds 2
+    try {
+      $health = Invoke-RestMethod -Uri "http://localhost:$HostPort/api/health" -TimeoutSec 5
+      if ($health.ok) {
+        Write-Host "DRISHTI - AMR Health is running: http://localhost:$HostPort" -ForegroundColor Green
+        Write-Host "Use Admin > RDS API Connections to add real plant RDS URLs."
+        return
+      }
+    } catch { }
+
+    $state = podman inspect $ContainerName --format '{{.State.Status}}' 2>$null
+    if ($state -eq 'exited') { break }
+  }
+
+  Write-Host "`nAMR Health startup logs:" -ForegroundColor Yellow
+  podman logs --tail 100 $ContainerName 2>&1 | Out-Host
+  Write-Host "`nPostgreSQL startup logs:" -ForegroundColor Yellow
+  podman logs --tail 50 $DatabaseContainerName 2>&1 | Out-Host
+  throw "AMR Health did not become healthy at http://localhost:$HostPort. The startup logs above contain the underlying error."
 }

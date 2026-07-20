@@ -457,6 +457,22 @@ func mergeCoreRobotStatus(fleet map[string]*AMRStatus, core map[string]coreRobot
 			if existing.Plant == "" {
 				existing.Plant = st.Plant
 			}
+			// /robotsStatus is the complete live roster. Its connection_status is
+			// therefore a stronger connectivity signal than absence from the
+			// agvStatusCurrent response, which can contain only changed rows.
+			if st.ConnectionStatus == 1 {
+				existing.LiveStatus = "online"
+				existing.Status = "ok"
+				if existing.StatusLabel == "" || existing.StatusLabel == "Offline" {
+					existing.StatusLabel = "Online"
+					existing.LastIssue = "RDS Core reports robot online"
+				}
+			} else {
+				existing.LiveStatus = "offline"
+				existing.Status = "error"
+				existing.StatusLabel = "Offline"
+				existing.LastIssue = "RDS Core reports robot offline"
+			}
 			applyCoreOfflineFallback(existing, st)
 			continue
 		}
@@ -566,14 +582,9 @@ func applyLiveStatus(fleet map[string]*AMRStatus, live map[string]robowatch.Robo
 	for _, s := range fleet {
 		ls, present := live[fleetKey(s.Plant, s.Name)]
 		if !present {
-			// Infer "offline by absence" only when the live map was scoped to this
-			// exact plant (single-plant view). In All-Plants, absence from a subset
-			// of plants is ambiguous, so leave the log status untouched.
-			if plantScope != "" && s.Plant == plantScope {
-				s.LiveStatus = "offline"
-				s.StatusCode = 0
-				s.Status = "error"
-			}
+			// agvStatusCurrent is not a guaranteed full-fleet roster on every RDS
+			// version. Absence is unknown; /robotsStatus supplies the authoritative
+			// connection_status later in the merge pipeline.
 			continue
 		}
 		if ls.Online {

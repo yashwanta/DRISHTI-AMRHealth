@@ -24,6 +24,17 @@ function Update-ProcessPath {
     $env:Path = @($machinePath, $userPath) -join ';'
 }
 
+function Test-PodmanResource([string[]]$Arguments) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & podman @Arguments *> $null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 Update-ProcessPath
 if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
     if ($SkipPodmanInstall) { throw 'Podman is required but is not installed.' }
@@ -37,7 +48,8 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
 
 $machines = podman machine list --format json 2>$null | ConvertFrom-Json
 if (-not $machines) { podman machine init }
-podman machine start *> $null
+$machines = podman machine list --format json 2>$null | ConvertFrom-Json
+if (-not ($machines | Where-Object { $_.Running -eq $true })) { podman machine start | Out-Host }
 podman info | Out-Null
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
@@ -54,7 +66,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not load the bundled runtime images.' }
 
 function New-RandomSecret([int]$bytes = 32) {
     $buffer = [byte[]]::new($bytes)
-    [Security.Cryptography.RandomNumberGenerator]::Fill($buffer)
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($buffer) }
+    finally { $generator.Dispose() }
     return [Convert]::ToBase64String($buffer)
 }
 
@@ -74,8 +88,9 @@ if (-not $SkipLLMKey) {
     try {
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
         if ($plainKey) {
-            podman secret inspect drishti_llm_api_key *> $null
-            if ($LASTEXITCODE -eq 0) { podman secret rm drishti_llm_api_key | Out-Null }
+            if (Test-PodmanResource @('secret','inspect','drishti_llm_api_key')) {
+                podman secret rm drishti_llm_api_key | Out-Null
+            }
             $plainKey | podman secret create drishti_llm_api_key - | Out-Null
         }
     } finally {
