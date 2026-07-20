@@ -80,6 +80,8 @@ $zipPath = Join-Path $out "$packageName.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 Compress-Archive -Path $stage -DestinationPath $zipPath -Force
 Write-Output "Created $zipPath"
+$zipHash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
+Set-Content -LiteralPath "$zipPath.sha256" -Value "$($zipHash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($zipPath))" -Encoding ASCII
 
 if (Get-Command tar -ErrorAction SilentlyContinue) {
   $tarPath = Join-Path $out "$packageName.tar.gz"
@@ -88,6 +90,8 @@ if (Get-Command tar -ErrorAction SilentlyContinue) {
   try {
     tar -czf $tarPath $packageName
     Write-Output "Created $tarPath"
+    $tarHash = Get-FileHash -LiteralPath $tarPath -Algorithm SHA256
+    Set-Content -LiteralPath "$tarPath.sha256" -Value "$($tarHash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($tarPath))" -Encoding ASCII
   } finally {
     Pop-Location
   }
