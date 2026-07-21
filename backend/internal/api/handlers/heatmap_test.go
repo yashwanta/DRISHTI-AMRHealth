@@ -42,14 +42,22 @@ func TestValidateScanPointRejectsTimestampMismatch(t *testing.T) {
 	}
 }
 
-func TestFingerprintDeduplicatesUnchangedTuple(t *testing.T) {
+func TestFingerprintDeduplicatesOnlySameCapture(t *testing.T) {
 	a, b := validHeatmapPoint(), validHeatmapPoint()
-	b.Timestamp = a.Timestamp.Add(time.Hour)
+	session := int64(8)
+	a.SessionID, b.SessionID = &session, &session
+	b.Timestamp = a.Timestamp
 	if fingerprint(a) != fingerprint(b) {
-		t.Fatal("unchanged position/Wi-Fi tuple should deduplicate")
+		t.Fatal("the same capture should deduplicate")
 	}
-	b.RSSIDBM--
+	b.Timestamp = a.Timestamp.Add(time.Hour)
 	if fingerprint(a) == fingerprint(b) {
-		t.Fatal("changed Wi-Fi tuple should not deduplicate")
+		t.Fatal("a later observation should not deduplicate")
+	}
+	newSession := int64(9)
+	b.Timestamp = a.Timestamp
+	b.SessionID = &newSession
+	if fingerprint(a) == fingerprint(b) {
+		t.Fatal("a new survey session should not inherit duplicate state")
 	}
 }

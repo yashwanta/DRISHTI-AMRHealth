@@ -180,7 +180,14 @@ func validateScanPoint(p *WifiScanPoint, tolerance time.Duration) error {
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func fingerprint(p WifiScanPoint) string {
-	raw := fmt.Sprintf("%s|%s|%s|%s|%.4f|%.4f|%d|%s|%t", strings.ToLower(p.PlantID), p.MapID, p.MapVersion, strings.ToLower(p.AMRID), p.X, p.Y, p.RSSIDBM, strings.ToLower(p.BSSID), p.Connected)
+	// Deduplicate an exact retry of one capture, not every future observation at
+	// the same position. Including session and capture time lets a new survey
+	// record a stationary AMR while still rejecting a repeated request.
+	sessionID := int64(0)
+	if p.SessionID != nil {
+		sessionID = *p.SessionID
+	}
+	raw := fmt.Sprintf("%d|%d|%s|%s|%s|%s|%.4f|%.4f|%d|%s|%t", sessionID, p.Timestamp.UnixNano(), strings.ToLower(p.PlantID), p.MapID, p.MapVersion, strings.ToLower(p.AMRID), p.X, p.Y, p.RSSIDBM, strings.ToLower(p.BSSID), p.Connected)
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }

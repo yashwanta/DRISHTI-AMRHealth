@@ -1082,6 +1082,15 @@ export default function WifiHeatmapAdminPage() {
               <g>
                 {routeGroups.map(([key, points]) => {
                   const latest = points[points.length - 1];
+                  const liveRobot = latest
+                    ? robots.find(
+                        (robot) =>
+                          robot.name.toLowerCase() === latest.amr_id.toLowerCase(),
+                      )
+                    : undefined;
+                  const routeSignal = liveRobot
+                    ? liveRobotStatus(liveRobot)
+                    : { label: "Wi-Fi unknown", fill: "#64748b" };
                   return (
                     <g key={key}>
                       <polyline
@@ -1089,7 +1098,7 @@ export default function WifiHeatmapAdminPage() {
                           .map((point) => `${point.x},${-point.y}`)
                           .join(" ")}
                         fill="none"
-                        stroke="#22d3ee"
+                        stroke={routeSignal.fill}
                         strokeWidth=".38"
                         strokeLinejoin="round"
                         strokeLinecap="round"
@@ -1099,11 +1108,11 @@ export default function WifiHeatmapAdminPage() {
                           cx={latest.x}
                           cy={-latest.y}
                           r=".55"
-                          fill="#22d3ee"
+                          fill={routeSignal.fill}
                         >
                           <title>
                             {latest.amr_id} route · {points.length} points ·
-                            nearest {latest.nearest_location || "unknown"}
+                            {routeSignal.label} · nearest {latest.nearest_location || "unknown"}
                           </title>
                         </circle>
                       )}
