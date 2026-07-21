@@ -2,13 +2,91 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"drishti-amr-health/internal/models"
+	amrssh "drishti-amr-health/internal/ssh"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type amrTCPDiagnosticRequest struct {
+	IP    string `json:"ip"`
+	Ports []int  `json:"ports"`
+}
+
+func (h *ServerHandler) DiagnoseAMRTCP(w http.ResponseWriter, r *http.Request) {
+	var req amrTCPDiagnosticRequest
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonError(w, "invalid diagnostic request", http.StatusBadRequest)
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(req.IP)).To4()
+	if ip == nil || ip[0] != 10 || ip[1] != 222 || ip[2] == 10 {
+		jsonError(w, "diagnostics are limited to Springfield AMR addresses", http.StatusBadRequest)
+		return
+	}
+	ports := []int{}
+	seen := map[int]bool{}
+	for _, port := range req.Ports {
+		if port >= 1 && port <= 65535 && !seen[port] && len(ports) < 20 {
+			ports = append(ports, port)
+			seen[port] = true
+		}
+	}
+	if len(ports) == 0 {
+		jsonError(w, "at least one valid TCP port is required", http.StatusBadRequest)
+		return
+	}
+
+	var serverID, sshPort int
+	var name, host, username, authType, passwordEnc, privateKeyEnc string
+	err := h.db.QueryRow(r.Context(), `SELECT id,name,host,port,username,auth_type,COALESCE(password_enc,''),COALESCE(private_key_enc,'') FROM servers WHERE host='10.222.10.76' OR name ILIKE '%springfield%' ORDER BY CASE WHEN host='10.222.10.76' THEN 0 ELSE 1 END LIMIT 1`).Scan(&serverID, &name, &host, &sshPort, &username, &authType, &passwordEnc, &privateKeyEnc)
+	if err != nil {
+		jsonError(w, "Springfield Fleet Manager SSH connection is not configured", http.StatusUnprocessableEntity)
+		return
+	}
+	password, privateKey := "", ""
+	if passwordEnc != "" {
+		password, err = decrypt(h.encryptionKey, passwordEnc)
+	}
+	if err == nil && privateKeyEnc != "" {
+		privateKey, err = decrypt(h.encryptionKey, privateKeyEnc)
+	}
+	if err != nil {
+		jsonError(w, "could not decrypt Fleet Manager credentials", http.StatusInternalServerError)
+		return
+	}
+	client, err := amrssh.Connect(amrssh.Config{Host: host, Port: sshPort, Username: username, AuthType: authType, Password: password, PrivateKey: privateKey})
+	if err != nil {
+		jsonError(w, "Fleet Manager SSH connection failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer client.Close()
+
+	ipText := ip.String()
+	portText := make([]string, len(ports))
+	for i, port := range ports {
+		portText[i] = strconv.Itoa(port)
+	}
+	command := fmt.Sprintf(`echo '=== ICMP ==='; ping -c 2 -W 1 %s 2>&1 || true; echo '=== NEIGHBOR ==='; ip neigh show %s 2>&1 || true; echo '=== SOCKETS ==='; ss -Htan dst %s 2>&1 || true; echo '=== TCP PORTS ==='; for p in %s; do if timeout 3 bash -c "</dev/tcp/%s/$p" 2>/dev/null; then echo "$p OPEN"; else echo "$p NO RESPONSE"; fi; done`, ipText, ipText, ipText, strings.Join(portText, " "), ipText)
+	output, runErr := client.Run(command)
+	status := "success"
+	errText := ""
+	if runErr != nil {
+		status, errText = "failed", runErr.Error()
+	}
+	if len(output) > 12000 {
+		output = output[:12000] + "\n[output truncated]"
+	}
+	_, _ = h.db.Exec(r.Context(), `INSERT INTO action_runs(server_id,action,command,status,output,error,created_by) VALUES($1,'amr_tcp_diagnostic',$2,$3,$4,$5,$6)`, serverID, "read-only TCP diagnostic for "+ipText, status, output, errText, createdBy(r))
+	jsonOK(w, map[string]any{"ok": runErr == nil, "ip": ipText, "server": name, "ports": ports, "output": output, "error": errText, "checked_at": time.Now().UTC()})
+}
 
 type ServerHandler struct {
 	db            *pgxpool.Pool

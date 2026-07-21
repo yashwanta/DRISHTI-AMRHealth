@@ -21,6 +21,71 @@ type HeatmapHandler struct{ db *pgxpool.Pool }
 
 func NewHeatmapHandler(db *pgxpool.Pool) *HeatmapHandler { return &HeatmapHandler{db: db} }
 
+type SurveyRoutePoint struct {
+	ID              int64     `json:"id,omitempty"`
+	SessionID       int64     `json:"session_id"`
+	PlantID         string    `json:"plant_id"`
+	MapID           string    `json:"map_id"`
+	MapVersion      string    `json:"map_version"`
+	AMRID           string    `json:"amr_id"`
+	Timestamp       time.Time `json:"timestamp"`
+	X               float64   `json:"x"`
+	Y               float64   `json:"y"`
+	Heading         *float64  `json:"heading,omitempty"`
+	Moving          bool      `json:"moving"`
+	Speed           *float64  `json:"speed,omitempty"`
+	Connected       bool      `json:"connected"`
+	NearestLocation string    `json:"nearest_location,omitempty"`
+}
+
+func (h *HeatmapHandler) SaveRoutePoint(w http.ResponseWriter, r *http.Request) {
+	var p SurveyRoutePoint
+	if json.NewDecoder(r.Body).Decode(&p) != nil {
+		jsonError(w, "invalid route point", 400)
+		return
+	}
+	p.PlantID, p.MapID, p.MapVersion, p.AMRID, p.NearestLocation = strings.TrimSpace(p.PlantID), strings.TrimSpace(p.MapID), strings.TrimSpace(p.MapVersion), strings.TrimSpace(p.AMRID), strings.TrimSpace(p.NearestLocation)
+	if p.SessionID <= 0 || p.PlantID == "" || p.MapID == "" || p.MapVersion == "" || p.AMRID == "" || p.Timestamp.IsZero() {
+		jsonError(w, "session, plant, map, map version, AMR and timestamp are required", 422)
+		return
+	}
+	if !isFinite(p.X) || !isFinite(p.Y) {
+		jsonError(w, "finite X/Y coordinates are required", 422)
+		return
+	}
+	var sessionPlant, sessionMap, sessionVersion, sessionAMRs, status string
+	if err := h.db.QueryRow(r.Context(), `SELECT plant_id,map_id,map_version,amr_id,status FROM wifi_scan_sessions WHERE id=$1`, p.SessionID).Scan(&sessionPlant, &sessionMap, &sessionVersion, &sessionAMRs, &status); err != nil {
+		jsonError(w, "recording session not found", 404)
+		return
+	}
+	if status != "running" || !strings.EqualFold(sessionPlant, p.PlantID) || sessionMap != p.MapID || sessionVersion != p.MapVersion || !containsCSVValue(sessionAMRs, p.AMRID) {
+		jsonError(w, "route point does not match the active recording session", 422)
+		return
+	}
+	raw := fmt.Sprintf("%d|%s|%d|%.4f|%.4f", p.SessionID, strings.ToLower(p.AMRID), p.Timestamp.Unix(), p.X, p.Y)
+	sum := sha256.Sum256([]byte(raw))
+	fp := hex.EncodeToString(sum[:])
+	err := h.db.QueryRow(r.Context(), `INSERT INTO wifi_survey_route_points(session_id,plant_id,map_id,map_version,amr_id,timestamp,x,y,heading,moving,speed,connected,nearest_location,fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(fingerprint) DO NOTHING RETURNING id`, p.SessionID, p.PlantID, p.MapID, p.MapVersion, p.AMRID, p.Timestamp, p.X, p.Y, p.Heading, p.Moving, p.Speed, p.Connected, p.NearestLocation, fp).Scan(&p.ID)
+	if err == pgx.ErrNoRows {
+		jsonOK(w, map[string]any{"saved": false, "duplicate": true})
+		return
+	}
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, map[string]any{"saved": true, "point": p})
+}
+
+func containsCSVValue(values, target string) bool {
+	for _, value := range strings.Split(values, ",") {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
+}
+
 type WifiScanPoint struct {
 	ID                int64     `json:"id,omitempty"`
 	SessionID         *int64    `json:"session_id,omitempty"`
@@ -209,7 +274,7 @@ func (h *HeatmapHandler) StopSession(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"stopped": tag.RowsAffected() > 0})
 }
 func (h *HeatmapHandler) Sessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(r.Context(), `SELECT id,plant_id,map_id,map_version,amr_id,status,moving_interval_seconds,stationary_interval_seconds,timestamp_tolerance_seconds,sample_count,started_by,started_at,stopped_at FROM wifi_scan_sessions ORDER BY started_at DESC LIMIT 50`)
+	rows, err := h.db.Query(r.Context(), `SELECT s.id,s.plant_id,s.map_id,s.map_version,s.amr_id,s.status,s.moving_interval_seconds,s.stationary_interval_seconds,s.timestamp_tolerance_seconds,s.sample_count,(SELECT COUNT(*) FROM wifi_survey_route_points rp WHERE rp.session_id=s.id),s.started_by,s.started_at,s.stopped_at FROM wifi_scan_sessions s ORDER BY s.started_at DESC LIMIT 50`)
 	if err != nil {
 		jsonError(w, err.Error(), 500)
 		return
@@ -217,13 +282,13 @@ func (h *HeatmapHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, count int64
+		var id, count, routeCount int64
 		var plant, mapID, version, amr, status, user string
 		var moving, stationary, tolerance int
 		var started time.Time
 		var stopped *time.Time
-		if rows.Scan(&id, &plant, &mapID, &version, &amr, &status, &moving, &stationary, &tolerance, &count, &user, &started, &stopped) == nil {
-			out = append(out, map[string]any{"id": id, "plant_id": plant, "map_id": mapID, "map_version": version, "amr_id": amr, "status": status, "moving_interval_seconds": moving, "stationary_interval_seconds": stationary, "timestamp_tolerance_seconds": tolerance, "sample_count": count, "started_by": user, "started_at": started, "stopped_at": stopped})
+		if rows.Scan(&id, &plant, &mapID, &version, &amr, &status, &moving, &stationary, &tolerance, &count, &routeCount, &user, &started, &stopped) == nil {
+			out = append(out, map[string]any{"id": id, "plant_id": plant, "map_id": mapID, "map_version": version, "amr_id": amr, "status": status, "moving_interval_seconds": moving, "stationary_interval_seconds": stationary, "timestamp_tolerance_seconds": tolerance, "sample_count": count, "route_count": routeCount, "started_by": user, "started_at": started, "stopped_at": stopped})
 		}
 	}
 	jsonOK(w, out)
@@ -257,6 +322,16 @@ type rawPoint struct {
 	Timestamp  time.Time `json:"timestamp"`
 	Disconnect bool      `json:"disconnect_event"`
 	Roam       bool      `json:"roam_event"`
+}
+type routePoint struct {
+	SessionID       int64     `json:"session_id"`
+	X               float64   `json:"x"`
+	Y               float64   `json:"y"`
+	AMR             string    `json:"amr_id"`
+	Timestamp       time.Time `json:"timestamp"`
+	Moving          bool      `json:"moving"`
+	Connected       bool      `json:"connected"`
+	NearestLocation string    `json:"nearest_location"`
 }
 type accumulator struct {
 	cell
@@ -433,5 +508,41 @@ func (h *HeatmapHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Y < out[j].Y
 	})
-	jsonOK(w, map[string]any{"cells": out, "points": points, "grid_size": grid, "metric": metric})
+	routeArgs := []any{plant, mapID, version}
+	routeWhere := `plant_id=$1 AND map_id=$2 AND map_version=$3`
+	if v := q.Get("amr"); v != "" {
+		filtered := []string{}
+		for _, amr := range strings.Split(v, ",") {
+			if value := strings.TrimSpace(amr); value != "" {
+				filtered = append(filtered, value)
+			}
+		}
+		if len(filtered) > 0 {
+			routeArgs = append(routeArgs, filtered)
+			routeWhere += fmt.Sprintf(" AND amr_id=ANY($%d)", len(routeArgs))
+		}
+	}
+	if v := q.Get("start"); v != "" {
+		if t, e := time.Parse(time.RFC3339, v); e == nil {
+			routeArgs = append(routeArgs, t)
+			routeWhere += fmt.Sprintf(" AND timestamp >= $%d", len(routeArgs))
+		}
+	}
+	if v := q.Get("end"); v != "" {
+		if t, e := time.Parse(time.RFC3339, v); e == nil {
+			routeArgs = append(routeArgs, t)
+			routeWhere += fmt.Sprintf(" AND timestamp <= $%d", len(routeArgs))
+		}
+	}
+	route := []routePoint{}
+	if routeRows, routeErr := h.db.Query(r.Context(), `SELECT session_id,x,y,amr_id,timestamp,moving,connected,nearest_location FROM wifi_survey_route_points WHERE `+routeWhere+` ORDER BY timestamp`, routeArgs...); routeErr == nil {
+		defer routeRows.Close()
+		for routeRows.Next() {
+			var point routePoint
+			if routeRows.Scan(&point.SessionID, &point.X, &point.Y, &point.AMR, &point.Timestamp, &point.Moving, &point.Connected, &point.NearestLocation) == nil {
+				route = append(route, point)
+			}
+		}
+	}
+	jsonOK(w, map[string]any{"cells": out, "points": points, "route_points": route, "grid_size": grid, "metric": metric})
 }

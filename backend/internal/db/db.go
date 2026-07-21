@@ -382,6 +382,29 @@ CREATE TABLE IF NOT EXISTS wifi_scan_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_wifi_scan_sessions_scope ON wifi_scan_sessions(plant_id, map_id, map_version, started_at DESC);
 
+-- Route positions are independent from Wi-Fi measurements so a traveled path
+-- remains visible when an RSSI source is temporarily stale or unavailable.
+CREATE TABLE IF NOT EXISTS wifi_survey_route_points (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT NOT NULL REFERENCES wifi_scan_sessions(id) ON DELETE CASCADE,
+    plant_id TEXT NOT NULL,
+    map_id TEXT NOT NULL,
+    map_version TEXT NOT NULL,
+    amr_id TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+    x DOUBLE PRECISION NOT NULL,
+    y DOUBLE PRECISION NOT NULL,
+    heading DOUBLE PRECISION,
+    moving BOOLEAN NOT NULL DEFAULT FALSE,
+    speed DOUBLE PRECISION,
+    connected BOOLEAN NOT NULL DEFAULT TRUE,
+    nearest_location TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fingerprint TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_wifi_survey_route_scope ON wifi_survey_route_points(plant_id, map_id, map_version, timestamp);
+CREATE INDEX IF NOT EXISTS idx_wifi_survey_route_session ON wifi_survey_route_points(session_id, timestamp);
+
 CREATE TABLE IF NOT EXISTS wifi_scan_points (
     id BIGSERIAL PRIMARY KEY,
     session_id BIGINT REFERENCES wifi_scan_sessions(id) ON DELETE SET NULL,

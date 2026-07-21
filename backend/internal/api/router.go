@@ -153,10 +153,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 				r.With(authH.PermissionOnly("users")).Post("/users", authH.CreateUser)
 				r.With(authH.PermissionOnly("users")).Put("/users/{id}", authH.UpdateUser)
 				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/points", heatmapH.SavePoint)
+				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/route-points", heatmapH.SaveRoutePoint)
 				r.With(authH.PermissionOnly("heatmap")).Get("/wifi-heatmap/query", heatmapH.Query)
 				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/sessions", heatmapH.StartSession)
 				r.With(authH.PermissionOnly("heatmap")).Get("/wifi-heatmap/sessions", heatmapH.Sessions)
 				r.With(authH.PermissionOnly("heatmap")).Post("/wifi-heatmap/sessions/{id}/stop", heatmapH.StopSession)
+				r.Post("/amr/tcp-diagnostics", serverH.DiagnoseAMRTCP)
 
 				r.Post("/servers", serverH.Create)
 				r.Put("/servers/{id}", serverH.Update)
