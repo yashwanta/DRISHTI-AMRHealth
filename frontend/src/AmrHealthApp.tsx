@@ -1226,7 +1226,15 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
     setView(nextView);
   }
   async function pullLiveCore() {
-    if (selectedImportPlant === ALL_IMPORT_PLANTS) {
+    // Admin has its own import selector. Every other page must honor the Plant
+    // selector in the top bar instead of falling back to Shelbyville.
+    const targetPlant = view === "admin"
+      ? selectedImportPlant
+      : plantFilter === "All"
+        ? ALL_IMPORT_PLANTS
+        : plantFilter;
+    const returnView = view === "admin" ? "admin" : view;
+    if (targetPlant === ALL_IMPORT_PLANTS) {
       setBusy("Pulling all plants");
       const loaded: string[] = [];
       const failed: string[] = [];
@@ -1235,7 +1243,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
           try {
             const response = await fetch(rdsProxyUrl(connection.plant, "core", true, connection.plant));
             if (!response.ok) throw new Error((await response.json()).error || response.statusText);
-            mergeImport(normalizeRdsCoreResponse(await response.json(), connection.plant, connection), "admin");
+            mergeImport(normalizeRdsCoreResponse(await response.json(), connection.plant, connection), returnView);
             loaded.push(connection.plant);
           } catch (error) {
             failed.push(`${connection.plant}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1252,15 +1260,15 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
       }
       return;
     }
-    const connection = connections.find((item) => item.plant === selectedImportPlant);
+    const connection = connections.find((item) => item.plant === targetPlant);
     if (!connection) return;
-    setBusy(`Pulling ${selectedImportPlant}`);
+    setBusy(`Pulling ${targetPlant}`);
     try {
-      const response = await fetch(rdsProxyUrl(selectedImportPlant, "core", true, selectedImportPlant));
+      const response = await fetch(rdsProxyUrl(targetPlant, "core", true, targetPlant));
       if (!response.ok) throw new Error((await response.json()).error || response.statusText);
       const payload = await response.json();
-      mergeImport(normalizeRdsCoreResponse(payload, selectedImportPlant, connection));
-      void fetchSceneMap(selectedImportPlant).catch((error) => setState((current) => ({ ...current, rdsImportNote: `${current.rdsImportNote} Map pull failed: ${error instanceof Error ? error.message : String(error)}` })));
+      mergeImport(normalizeRdsCoreResponse(payload, targetPlant, connection), returnView);
+      void fetchSceneMap(targetPlant).catch((error) => setState((current) => ({ ...current, rdsImportNote: `${current.rdsImportNote} Map pull failed: ${error instanceof Error ? error.message : String(error)}` })));
     } catch (error) {
       setState((current) => ({ ...current, rdsImportNote: `Live pull failed: ${error instanceof Error ? error.message : String(error)}` }));
     } finally { setBusy(""); }
