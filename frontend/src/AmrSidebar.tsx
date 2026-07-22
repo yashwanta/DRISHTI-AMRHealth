@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Server, RefreshCw, LogIn, LogOut, Search, Map, ScanLine, BarChart3, KeyRound, Signal, Users } from 'lucide-react'
+import { LayoutDashboard, FileText, Radio, BrainCircuit, Activity, ScrollText, Wifi, Server, RefreshCw, LogIn, LogOut, Search, Map, ScanLine, BarChart3, KeyRound, Signal, Users, Settings } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useAuth } from './auth'
 
@@ -17,6 +17,7 @@ const nav = [
 ]
 
 const adminNav = [
+  { to: '/amr/admin', label: 'Setup', Icon: Settings, permission: 'discovery' as const },
   { to: '/users', label: 'User Management', Icon: Users, permission: 'users' as const },
   { to: '/amr/discovery', label: 'Discovery', Icon: Search, permission: 'discovery' as const },
   { to: '/amr/heatmap', label: 'Heat Map', Icon: Map, permission: 'heatmap' as const },

@@ -33,6 +33,43 @@ function Invoke-Step($Message, [scriptblock]$Action) {
   & $Action
 }
 
+function Test-IsAdministrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-WSLReady {
+  if (-not (Test-Command wsl.exe)) { return $false }
+  & wsl.exe --status *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+function Register-InstallResume {
+  $taskName = 'DRISHTI AMR Health - Complete Installation'
+  $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+  $argument = "-NoProfile -ExecutionPolicy Bypass -File `"$root\Install-DRISHTI-Windows.ps1`" -HostPort $HostPort"
+  $action = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument $argument
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+  $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+}
+
+if (-not (Test-IsAdministrator)) {
+  throw 'Run this installer from PowerShell as Administrator.'
+}
+
+Invoke-Step "Checking Windows virtualization support" {
+  if (-not (Test-WSLReady)) {
+    Write-Host 'WSL 2 is required by Podman. Windows will enable it now.' -ForegroundColor Yellow
+    Register-InstallResume
+    & wsl.exe --install --no-distribution
+    if ($LASTEXITCODE -ne 0) { throw 'Windows could not enable WSL. Confirm hardware virtualization is enabled in BIOS/UEFI.' }
+    Write-Host 'Restart Windows. DRISHTI installation will resume automatically after you sign in.' -ForegroundColor Yellow
+    exit 3010
+  }
+}
+
 Invoke-Step "Checking host dependencies" {
   Write-Host "Required host dependency: Podman."
   Write-Host "Container build dependencies are handled inside Containerfile: Node.js, npm, Go, Alpine, OpenSSH client."
@@ -59,13 +96,16 @@ Invoke-Step "Starting Podman machine" {
   $machineList = if ($machineJson) { $machineJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { @() }
   if (-not $machineList -or $machineList.Count -eq 0) {
     podman machine init
+    if ($LASTEXITCODE -ne 0) { throw 'Podman machine initialization failed. Run wsl --status and confirm WSL 2 is operational.' }
   }
   $machineJson = podman machine list --format json 2>$null
   $running = $machineJson | ConvertFrom-Json | Where-Object { $_.Running -eq $true }
   if (-not $running) {
     podman machine start
+    if ($LASTEXITCODE -ne 0) { throw 'Podman machine failed to start.' }
   }
   podman info | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Podman is installed but its Linux machine is not reachable.' }
 }
 
 Invoke-Step "Preparing local data config" {
@@ -74,7 +114,7 @@ Invoke-Step "Preparing local data config" {
   New-Item -ItemType Directory -Force -Path "data\keys" | Out-Null
   if (-not (Test-Path -LiteralPath "data\config\api-connections.json")) {
     Copy-Item -LiteralPath "data\config\api-connections.example.json" -Destination "data\config\api-connections.json"
-    Write-Host "Created data\config\api-connections.json from example. Add real plant URLs in the app Admin page."
+    Write-Host "Created data\config\api-connections.json from example. Add real plant URLs from Admin > Setup."
   } else {
     Write-Host "Keeping existing local data\config\api-connections.json."
   }
@@ -191,7 +231,8 @@ Invoke-Step "Verifying app" {
       $health = Invoke-RestMethod -Uri "http://localhost:$HostPort/api/health" -TimeoutSec 5
       if ($health.ok) {
         Write-Host "DRISHTI - AMR Health is running: http://localhost:$HostPort" -ForegroundColor Green
-        Write-Host "Use Admin > RDS API Connections to add real plant RDS URLs."
+        Unregister-ScheduledTask -TaskName 'DRISHTI AMR Health - Complete Installation' -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "Use Admin > Setup to add real plant RDS URLs."
         return
       }
     } catch { }

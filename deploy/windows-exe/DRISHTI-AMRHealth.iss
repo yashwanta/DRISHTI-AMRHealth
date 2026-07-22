@@ -24,11 +24,11 @@ SetupLogging=yes
 
 [Files]
 Source: "{#PodmanInstaller}"; DestDir: "{tmp}"; DestName: "podman-installer-windows-amd64.exe"; Flags: deleteafterinstall
-Source: "{#PayloadRoot}\*"; DestDir: "{tmp}\drishti-runtime"; Flags: recursesubdirs createallsubdirs deleteafterinstall
+Source: "{#PayloadRoot}\*"; DestDir: "{commonappdata}\DRISHTI-AMRHealth\installer"; Flags: recursesubdirs createallsubdirs
 
 [Run]
 Filename: "{tmp}\podman-installer-windows-amd64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing the bundled Podman runtime..."; Flags: waituntilterminated; Check: not PodmanInstalled
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\drishti-runtime\Install-DRISHTI-AMRHealth.ps1"" -SkipPodmanInstall"; StatusMsg: "Loading and starting DRISHTI AMR Health..."; Flags: waituntilterminated
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{commonappdata}\DRISHTI-AMRHealth\installer\Install-DRISHTI-AMRHealth.ps1"" -SkipPodmanInstall"; StatusMsg: "Loading and starting DRISHTI AMR Health..."; Flags: waituntilterminated
 
 [Code]
 function PodmanInstalled: Boolean;

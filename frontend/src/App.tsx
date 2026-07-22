@@ -52,6 +52,7 @@ function SiteOpsShell() {
           <Route path="/agent/fleet" element={<AMRFleetPage />} />
           <Route path="/amr-logs" element={<AMRLogsPage />} />
           <Route path="/amr/discovery" element={<AdminRoute permission="discovery"><AmrHealthApp embedded /></AdminRoute>} />
+          <Route path="/amr/admin" element={<AdminRoute permission="discovery"><AmrHealthApp embedded /></AdminRoute>} />
           <Route path="/amr/heatmap" element={<AdminRoute permission="heatmap"><AmrHealthApp embedded /></AdminRoute>} />
           <Route path="/admin/wifi-heatmap" element={<AdminRoute permission="heatmap"><WifiHeatmapAdminPage /></AdminRoute>} />
           <Route path="/amr/*" element={<AmrHealthApp embedded />} />

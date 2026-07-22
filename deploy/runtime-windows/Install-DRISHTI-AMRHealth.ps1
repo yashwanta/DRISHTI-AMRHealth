@@ -18,6 +18,32 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run this installer from PowerShell as Administrator.'
 }
 
+function Test-WSLReady {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $false }
+    & wsl.exe --status *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+function Register-InstallResume {
+    $taskName = 'DRISHTI AMR Health - Complete Installation'
+    $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $argument = "-NoProfile -ExecutionPolicy Bypass -File `"$bundleRoot\Install-DRISHTI-AMRHealth.ps1`" -HostPort $HostPort -InstallRoot `"$InstallRoot`" -LLMURL `"$LLMURL`" -LLMModel `"$LLMModel`" -SkipPodmanInstall"
+    if ($SkipLLMKey) { $argument += ' -SkipLLMKey' }
+    $action = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument $argument
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $taskPrincipal -Force | Out-Null
+}
+
+if (-not (Test-WSLReady)) {
+    Write-Host 'WSL 2 is required by Podman. Windows will enable it now.' -ForegroundColor Yellow
+    Register-InstallResume
+    & wsl.exe --install --no-distribution
+    if ($LASTEXITCODE -ne 0) { throw 'Windows could not enable WSL. Confirm hardware virtualization is enabled in BIOS/UEFI.' }
+    Write-Host 'Restart Windows. DRISHTI installation will resume automatically after you sign in.' -ForegroundColor Yellow
+    exit 3010
+}
+
 function Update-ProcessPath {
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -47,10 +73,17 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
 }
 
 $machines = podman machine list --format json 2>$null | ConvertFrom-Json
-if (-not $machines) { podman machine init }
+if (-not $machines) {
+    podman machine init
+    if ($LASTEXITCODE -ne 0) { throw 'Podman machine initialization failed.' }
+}
 $machines = podman machine list --format json 2>$null | ConvertFrom-Json
-if (-not ($machines | Where-Object { $_.Running -eq $true })) { podman machine start | Out-Host }
+if (-not ($machines | Where-Object { $_.Running -eq $true })) {
+    podman machine start | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Podman machine failed to start.' }
+}
 podman info | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Podman is installed but its Linux machine is not reachable.' }
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot 'data\config') | Out-Null
@@ -111,6 +144,7 @@ $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force | Out-Null
+Unregister-ScheduledTask -TaskName 'DRISHTI AMR Health - Complete Installation' -Confirm:$false -ErrorAction SilentlyContinue
 
 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
 $shortcutPath = Join-Path $desktop 'DRISHTI AMR Health.url'

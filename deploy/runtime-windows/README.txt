@@ -11,8 +11,8 @@ contain the Git repository, Go source, React source, Node.js, or Go toolchain.
 The ZIP installer installs Podman through winget when it is missing. The
 offline Setup EXE already contains the official Podman installer.
 
-Windows virtualization and WSL 2 support must be available. A restart may be
-required the first time Podman enables the necessary Windows features.
+The installer enables WSL 2 when needed. If Windows requires a restart,
+installation resumes automatically after the installing user signs in again.
 
 The API key is created as a Podman secret at installation time and is not part
 of the installer archive or container image. A local computer administrator can
