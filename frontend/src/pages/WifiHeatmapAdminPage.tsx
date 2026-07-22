@@ -219,6 +219,7 @@ export default function WifiHeatmapAdminPage() {
     [grid, setGrid] = useState(3),
     [minimum, setMinimum] = useState(3),
     [opacity, setOpacity] = useState(0.6),
+    [focusRobots, setFocusRobots] = useState(true),
     [layers, setLayers] = useState({
       heat: true,
       raw: true,
@@ -765,10 +766,28 @@ export default function WifiHeatmapAdminPage() {
     recordingSceneRef.current = undefined;
     await Promise.all([reloadHeat(), reloadSessions()]);
   };
-  const b = scene?.bounds,
+  const b = scene?.bounds;
+  const robotBounds = focusRobots && robots.length
+    ? {
+        minX: Math.min(...robots.map((robot) => robot.x)),
+        maxX: Math.max(...robots.map((robot) => robot.x)),
+        minY: Math.min(...robots.map((robot) => robot.y)),
+        maxY: Math.max(...robots.map((robot) => robot.y)),
+      }
+    : undefined;
+  const viewBounds = robotBounds
+    ? (() => {
+        const centerX = (robotBounds.minX + robotBounds.maxX) / 2;
+        const centerY = (robotBounds.minY + robotBounds.maxY) / 2;
+        const width = Math.max(28, robotBounds.maxX - robotBounds.minX + 16);
+        const height = Math.max(28, robotBounds.maxY - robotBounds.minY + 16);
+        return { minX: centerX - width / 2, maxX: centerX + width / 2, minY: centerY - height / 2, maxY: centerY + height / 2 };
+      })()
+    : b;
+  const
     pad = 2,
-    w = b ? Math.max(1, b.maxX - b.minX) : 1,
-    h = b ? Math.max(1, b.maxY - b.minY) : 1;
+    w = viewBounds ? Math.max(1, viewBounds.maxX - viewBounds.minX) : 1,
+    h = viewBounds ? Math.max(1, viewBounds.maxY - viewBounds.minY) : 1;
   const eligible = cells.filter((c) => c.measurement_count >= minimum);
   const displayValue = (c: Cell) =>
     aggregation === "minimum"
@@ -1025,6 +1044,10 @@ export default function WifiHeatmapAdminPage() {
             {k}
           </label>
         ))}
+        <label className="flex gap-1 font-semibold text-cyan-300">
+          <input type="checkbox" checked={focusRobots} onChange={(event) => setFocusRobots(event.target.checked)} />
+          Focus AMRs ({robots.filter((robot) => !robot.moving).length} parked)
+        </label>
         <label>
           opacity{" "}
           <input
@@ -1063,7 +1086,7 @@ export default function WifiHeatmapAdminPage() {
           <svg
             ref={mapSvgRef}
             className="w-full h-[650px]"
-            viewBox={`${b!.minX - pad} ${-b!.maxY - pad} ${w + pad * 2} ${h + pad * 2}`}
+            viewBox={`${viewBounds!.minX - pad} ${-viewBounds!.maxY - pad} ${w + pad * 2} ${h + pad * 2}`}
             onClick={placeAPOnMap}
           >
             <defs>
@@ -1267,7 +1290,7 @@ export default function WifiHeatmapAdminPage() {
               return (
                 <g key={`robot-${robot.name}`} transform={`translate(${robot.x} ${-robot.y})`}>
                   <circle r=".82" fill={signal.fill} stroke="#f8fafc" strokeWidth=".2" />
-                  <text x="1.05" y=".4" fontSize="1.35" fill="#f8fafc">{robot.name}</text>
+                  <text x="1.05" y=".4" fontSize="1.35" fill="#f8fafc">{robot.name} {robot.moving ? "Moving" : "Parked"}</text>
                   <title>{robot.name} · {signal.label}</title>
                 </g>
               );

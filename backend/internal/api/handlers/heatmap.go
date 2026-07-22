@@ -262,6 +262,13 @@ func (h *HeatmapHandler) StartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := usernameFromRequest(r)
+	// A browser refresh or service restart can lose the in-memory recorder before
+	// it calls StopSession. A new recorder for the plant supersedes those orphaned
+	// sessions, so close them before creating the new one.
+	if _, err := h.db.Exec(r.Context(), `UPDATE wifi_scan_sessions SET status='stopped',stopped_at=NOW() WHERE plant_id=$1 AND status='running'`, q.PlantID); err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
 	var id int64
 	var started time.Time
 	err := h.db.QueryRow(r.Context(), `INSERT INTO wifi_scan_sessions(plant_id,map_id,map_version,amr_id,moving_interval_seconds,stationary_interval_seconds,timestamp_tolerance_seconds,started_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,started_at`, q.PlantID, q.MapID, q.MapVersion, q.AMRID, q.MovingInterval, q.StationaryInterval, q.Tolerance, user).Scan(&id, &started)
@@ -281,6 +288,26 @@ func (h *HeatmapHandler) StopSession(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"stopped": tag.RowsAffected() > 0})
 }
 func (h *HeatmapHandler) Sessions(w http.ResponseWriter, r *http.Request) {
+	// Survey samples arrive every 2 seconds while moving and every 10 seconds
+	// while stationary. If a session has produced no route or Wi-Fi activity for
+	// two minutes, no recorder is alive and it must not be reported as running.
+	_, err := h.db.Exec(r.Context(), `
+		UPDATE wifi_scan_sessions s
+		SET status='stopped', stopped_at=GREATEST(
+			s.started_at,
+			COALESCE((SELECT MAX(rp.timestamp) FROM wifi_survey_route_points rp WHERE rp.session_id=s.id), s.started_at),
+			COALESCE((SELECT MAX(sp.timestamp) FROM wifi_scan_points sp WHERE sp.session_id=s.id), s.started_at)
+		)
+		WHERE s.status='running'
+		  AND GREATEST(
+			s.started_at,
+			COALESCE((SELECT MAX(rp.timestamp) FROM wifi_survey_route_points rp WHERE rp.session_id=s.id), s.started_at),
+			COALESCE((SELECT MAX(sp.timestamp) FROM wifi_scan_points sp WHERE sp.session_id=s.id), s.started_at)
+		  ) < NOW() - INTERVAL '2 minutes'`)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
 	rows, err := h.db.Query(r.Context(), `SELECT s.id,s.plant_id,s.map_id,s.map_version,s.amr_id,s.status,s.moving_interval_seconds,s.stationary_interval_seconds,s.timestamp_tolerance_seconds,s.sample_count,(SELECT COUNT(*) FROM wifi_survey_route_points rp WHERE rp.session_id=s.id),s.started_by,s.started_at,s.stopped_at FROM wifi_scan_sessions s ORDER BY s.started_at DESC LIMIT 50`)
 	if err != nil {
 		jsonError(w, err.Error(), 500)

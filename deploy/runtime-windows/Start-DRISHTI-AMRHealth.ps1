@@ -8,6 +8,17 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
     throw "Runtime settings are missing: $settingsPath"
 }
 
+function Update-ProcessPath {
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = @($machinePath, $userPath) -join ';'
+}
+
+Update-ProcessPath
+if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
+    throw 'Podman is installed but is not available on PATH. Repair the Podman installation and run this script again.'
+}
+
 function ConvertFrom-ProtectedString([System.Security.SecureString]$value) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($value)
     try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }

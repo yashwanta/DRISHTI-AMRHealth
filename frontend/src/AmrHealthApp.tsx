@@ -7,6 +7,11 @@ type View = "dashboard" | "logs" | "discovery" | "wifi-signal" | "heatmap" | "sc
 type Status = "Online" | "Offline" | "Disconnected" | "Unknown";
 type Severity = "High" | "Medium" | "Low";
 type ReportRange = "1h" | "6h" | "24h" | "custom";
+type ConnectivityHealthReport = {
+  plant: string; generatedAt: string; rdsTimestamp: string; total: number; connected: number;
+  disconnected: string[]; averageDelay: number; maximumDelay: number; weakWifi: string[];
+  staleWifi: number; staleWifiDetails: string[]; wifiRows: number; worstHistory: string[]; conclusion: string;
+};
 type APIConnection = { plant: string; baseUrl: string; corePath: string; scenePath: string };
 type AMR = {
   id: string; name: string; plant: string; ip: string; status: Status; reconnects: number; disconnects: number; offline: string;
@@ -45,6 +50,7 @@ type MapPolygon = { name: string; points: MapPoint[] };
 type SceneMap = { plant: string; area: string; md5: string; bounds: { minX: number; minY: number; maxX: number; maxY: number }; paths: MapPath[]; points: MapPoint[]; bins: MapPolygon[] };
 
 const STORAGE_KEY = "drishti-amr-health-react-v2";
+const SCAN_HISTORY_PURGE_KEY = "drishti-scan-history-purged-2026-07-21";
 const LEGACY_STORAGE_KEYS = ["drishti-amr-health-react-v1", "drishti-amr-health-state"];
 const ALL_IMPORT_PLANTS = "__all_plants__";
 const seed: AppState = {
@@ -87,7 +93,11 @@ function sceneSnapshotDataUrl(scene: SceneMap | undefined, samples: ConfidenceSa
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 function unique(values: string[]) { return [...new Set(values.filter(Boolean))].sort(); }
-function badge(value: string) { return <span className={`badge ${value.toLowerCase().replace(/\s+/g, "-")}`}>{value}</span>; }
+function badge(value: string) {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+  const connectionTone = normalized.startsWith("online-") ? "online" : "";
+  return <span className={`badge ${normalized} ${connectionTone}`.trim()}>{value}</span>;
+}
 function normalizeAmrName(value: string) {
   const match = value.trim().toUpperCase().match(/AMR[-_]?0*(\d+)/);
   return match ? `AMR-${match[1].padStart(2, "0")}` : value.trim().toUpperCase();
@@ -109,6 +119,30 @@ function applyIpOverrides(amrs: AMR[], overrides: IpOverride[] = []) {
   });
 }
 function hasRealRssi(value?: number | null) { return typeof value === "number" && Number.isFinite(value) && value !== 0; }
+const WIFI_FRESHNESS_MS = 5 * 60 * 1000;
+function wifiReadingIsStale(row: DiscoveryAMR, now = Date.now()) {
+  const seen = row.last_seen ? new Date(row.last_seen).getTime() : 0;
+  return !seen || !Number.isFinite(seen) || now - seen > WIFI_FRESHNESS_MS;
+}
+function wifiAgeLabel(lastSeen?: string) {
+  const seen = lastSeen ? new Date(lastSeen).getTime() : 0;
+  if (!seen || !Number.isFinite(seen)) return "age unknown";
+  const minutes = Math.max(0, Math.floor((Date.now() - seen) / 60000));
+  if (minutes < 1) return "less than 1 min old";
+  if (minutes < 60) return `${minutes} min old`;
+  const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+  return `${hours}h ${remainder}m old`;
+}
+function liveRdsActivityLabel(item: any) {
+  if (Number(item?.connection_status) === 0 || item?.undispatchable_reason?.disconnect === true) return "Offline";
+  const rbk = item?.rbk_report || {};
+  const chargeCurrent = Number(rbk.battery_charge_current ?? rbk.current);
+  if (rbk.charging === true || (Number.isFinite(chargeCurrent) && chargeCurrent > 1)) return "Online - Charging";
+  const speed = Math.hypot(Number(rbk.vx) || 0, Number(rbk.vy) || 0);
+  const orderState = String(item?.current_order?.state || "").toUpperCase();
+  if (speed > 0.01 || Math.abs(Number(rbk.w) || 0) > 0.01 || ["RUNNING", "EXECUTING", "MOVING", "GOING"].includes(orderState)) return "Online - Moving";
+  return "Online - Idle";
+}
 function rssiSignalTier(value?: number | null) {
   if (!hasRealRssi(value)) return "none";
   if ((value as number) <= -80) return "poor";
@@ -205,6 +239,12 @@ function formatMaybeTime(value?: string) {
 function datetimeLocalValue(value: Date) {
   const offsetMs = value.getTimezoneOffset() * 60000;
   return new Date(value.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+function localDateKey(value = new Date()) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 function addMinutes(value: string, minutes: number) {
   const date = new Date(value);
@@ -346,7 +386,17 @@ function deriveBadZones(amrs: AMR[], points: WifiPoint[] = []): BadZone[] {
   });
   return [...buckets.values()].sort((a, b) => b.score - a.score || a.zone.localeCompare(b.zone));
 }
-function loadState(): AppState { try { const loaded = { ...seed, ...(JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") || {}) } as AppState; return { ...loaded, confidenceSamples: pruneConfidenceSamples(loaded.confidenceSamples || []) }; } catch { return seed; } }
+function loadState(): AppState {
+  try {
+    const loaded = { ...seed, ...(JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") || {}) } as AppState;
+    if (localStorage.getItem(SCAN_HISTORY_PURGE_KEY) !== "done") {
+      loaded.confidenceSamples = [];
+      loaded.scanImages = {};
+      localStorage.setItem(SCAN_HISTORY_PURGE_KEY, "done");
+    }
+    return { ...loaded, confidenceSamples: pruneConfidenceSamples(loaded.confidenceSamples || []) };
+  } catch { return seed; }
+}
 function normalizePath(path: string, fallback: string) { const value = (path || fallback).trim() || fallback; return value.startsWith("/") ? value : `/${value}`; }
 function normalizeBaseUrl(url: string) { return (url || "").trim().replace(/\/+$/, ""); }
 function apiUrl(connection: APIConnection, key: "corePath" | "scenePath") { return `${normalizeBaseUrl(connection.baseUrl)}${normalizePath(connection[key], key === "scenePath" ? "/api/display-scene" : "/api/agv-report/core")}`; }
@@ -638,6 +688,8 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
   const [reportEvents, setReportEvents] = useState<LogEntry[]>([]);
   const [reportEventsUpdatedAt, setReportEventsUpdatedAt] = useState("");
   const [reportEventsStatus, setReportEventsStatus] = useState("Paused");
+  const [connectivityReports, setConnectivityReports] = useState<ConnectivityHealthReport[]>([]);
+  const [connectivityReportStatus, setConnectivityReportStatus] = useState("Generate a current RDS and Wi-Fi diagnostic report.");
   const [eventsLive, setEventsLive] = useState(false);
   const [selectedTimelineEvent, setSelectedTimelineEvent] = useState<LogEntry | null>(null);
   const [apiForm, setApiForm] = useState<APIConnection>({ plant: "", baseUrl: "", corePath: "/api/agv-report/core", scenePath: "/api/display-scene" });
@@ -720,13 +772,35 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
     try {
       setDiscoveryStatus("Loading AMR Wi-Fi signal telemetry...");
       const params = plantFilter !== "All" ? `?plant=${encodeURIComponent(plantFilter)}` : "";
-      const [response, fleetResponse] = await Promise.all([fetch(`/api/discovery${params}`), fetch(`/api/amr/fleet${params}`)]);
+      const coreTargets = plantFilter === "All" ? connections.map((item) => item.plant) : [plantFilter];
+      const [response, fleetResponse, liveCoreResults] = await Promise.all([
+        fetch(`/api/discovery${params}`),
+        fetch(`/api/amr/fleet${params}`),
+        Promise.all(coreTargets.map(async (target) => {
+          try {
+            const coreResponse = await fetch(rdsProxyUrl(target, "core", true, target));
+            if (!coreResponse.ok) return [];
+            const payload = await coreResponse.json();
+            return ((payload?.data?.report || []) as any[]).map((item) => ({ target, item }));
+          } catch { return []; }
+        })),
+      ]);
       const payload = await response.json() as { items?: DiscoveryAMR[]; message?: string; error?: string };
       if (!response.ok) throw new Error(payload.error || response.statusText);
       const fleet = fleetResponse.ok ? await fleetResponse.json() as { name: string; live_status?: string; status_label?: string }[] : [];
       const statusByAMR = new Map(fleet.map(item => [item.name.toLowerCase(), item.live_status === "online" ? `Online - ${item.status_label || "Connected"}` : item.status_label || "Offline"]));
-      setDiscoveryRows((payload.items || []).map(item => ({ ...item, rds_status: statusByAMR.get(item.amr.toLowerCase()) || "Not reported" })));
-      setDiscoveryStatus(payload.message || `Loaded ${(payload.items || []).length} Discovery rows.`);
+      const liveStatusByAMR = new Map<string, string>();
+      liveCoreResults.flat().forEach(({ target, item }) => {
+        const name = String(item?.uuid || item?.vehicle_id || item?.current_order?.vehicle || "").toLowerCase();
+        if (name) liveStatusByAMR.set(`${target.toLowerCase()}|${name}`, liveRdsActivityLabel(item));
+      });
+      const rows = (payload.items || []).map(item => ({
+        ...item,
+        rds_status: liveStatusByAMR.get(`${item.plant.toLowerCase()}|${item.amr.toLowerCase()}`) || statusByAMR.get(item.amr.toLowerCase()) || "Not reported",
+      }));
+      const stale = rows.filter((item) => wifiReadingIsStale(item)).length;
+      setDiscoveryRows(rows);
+      setDiscoveryStatus(`${payload.message || `Loaded ${rows.length} Discovery rows.`} Fresh ${rows.length - stale}; stale/last-known ${stale}. Readings older than 5 minutes are not treated as current signal quality.`);
     } catch (error) {
       setDiscoveryRows([]);
       setDiscoveryStatus(`Discovery signal load failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -785,8 +859,8 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
   const wifiPlantOptions = useMemo(() => unique([...connections.map((connection) => connection.plant), ...state.amrs.map((amr) => amr.plant), ...state.wifiSources.map((source) => source.plant)]), [connections, state.amrs, state.wifiSources]);
   const wifiAmrOptions = useMemo(() => state.amrs.filter((amr) => amr.plant === wifiForm.plant && amr.ip && amr.ip !== "unknown"), [state.amrs, wifiForm.plant]);
   const sortedDiscoveryRows = useMemo(() => [...discoveryRows].sort((a, b) => {
-    const deadA = hasRealRssi(a.rssi_dbm) && (a.rssi_dbm as number) <= -80;
-    const deadB = hasRealRssi(b.rssi_dbm) && (b.rssi_dbm as number) <= -80;
+    const deadA = !wifiReadingIsStale(a) && hasRealRssi(a.rssi_dbm) && (a.rssi_dbm as number) <= -80;
+    const deadB = !wifiReadingIsStale(b) && hasRealRssi(b.rssi_dbm) && (b.rssi_dbm as number) <= -80;
     if (deadA !== deadB) return deadA ? -1 : 1;
     const direction = discoverySort.direction === "asc" ? 1 : -1;
     return compareDiscoveryValues(a, b, discoverySort.key) * direction;
@@ -992,9 +1066,78 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
       { id: "health", label: "Plant Health", value: `${healthyAmrs.length}/${reportAmrs.length}`, help: "Open AMR health detail", tone: reportHealthTone(healthyAmrs.length) },
       { id: "risk", label: "Connectivity Risk", value: atRiskReportAmrs.length, help: atRiskReportAmrs.length ? `${atRiskReportAmrs.map((amr) => amr.name).slice(0, 3).join(", ")} need review` : "No at-risk AMRs in scope" },
       { id: "worst-area", label: "Worst Area", value: worstZone?.zone || "None", help: worstZone ? `${worstZone.plant} score ${worstZone.score}; ${(worstZone.robots || []).join(", ")}` : "No bad zones detected from current RDS sample" },
+      { id: "diagnostic", label: "RDS & Wi-Fi Report", value: connectivityReports.length ? "Ready" : "Run", help: connectivityReportStatus },
       { id: "events", label: "High Events", value: highEventLogs.length, help: highEventLogs.length ? "High severity events need review" : "No high severity RDS events in scope", action: "View All" }
     ];
-  }, [visibleBadZones, reportAmrs, atRiskReportAmrs, highEventLogs]);
+  }, [visibleBadZones, reportAmrs, atRiskReportAmrs, highEventLogs, connectivityReports.length, connectivityReportStatus]);
+  async function generateConnectivityReport() {
+    const targets = plantFilter === "All" ? connections.map((item) => item.plant) : [plantFilter];
+    if (!targets.length) return;
+    setBusy("Generating health report");
+    setConnectivityReportStatus("Pulling current RDS Core, FleetManager history, and Wi-Fi evidence...");
+    try {
+      const reports = await Promise.all(targets.map(async (target) => {
+        const [coreResponse, wifiResponse, fleetResponse] = await Promise.all([
+          fetch(rdsProxyUrl(target, "core", true, target)),
+          fetch(`/api/discovery?plant=${encodeURIComponent(target)}`),
+          fetch(`/api/amr/fleet?plant=${encodeURIComponent(target)}`),
+        ]);
+        if (!coreResponse.ok) throw new Error(`${target} RDS Core: ${coreResponse.statusText}`);
+        const core = await coreResponse.json();
+        const wifiPayload = wifiResponse.ok ? await wifiResponse.json() as { items?: DiscoveryAMR[] } : { items: [] };
+        const fleet = fleetResponse.ok ? await fleetResponse.json() as AMR[] : [];
+        const robots = (core?.data?.report || []) as any[];
+        const connected = robots.filter((item) => Number(item.connection_status) !== 0);
+        const disconnected = robots.filter((item) => Number(item.connection_status) === 0).map((item) => item.uuid || item.vehicle_id).filter(Boolean).sort();
+        const delays = robots.map((item) => Number(item.network_delay)).filter(Number.isFinite);
+        const wifiRows = wifiPayload.items || [];
+        const now = Date.now();
+        const staleRows = wifiRows.filter((item) => wifiReadingIsStale(item, now));
+        const staleWifi = staleRows.length;
+        const staleWifiDetails = staleRows.map((item) => `${item.amr} (${wifiAgeLabel(item.last_seen)})`).sort();
+        const weakWifi = wifiRows
+          .filter((item) => !wifiReadingIsStale(item, now) && typeof item.rssi_dbm === "number" && item.rssi_dbm <= -68)
+          .map((item) => `${item.amr} (${item.rssi_dbm} dBm)`)
+          .sort();
+        const worstHistory = [...fleet].sort((a, b) => Number(b.disconnects || 0) - Number(a.disconnects || 0)).filter((item) => Number(item.disconnects || 0) > 0).slice(0, 5).map((item) => `${item.name}: ${item.disconnects} disconnects`);
+        const conclusion = staleWifi === wifiRows.length && wifiRows.length
+          ? "RDS is reachable, but all Wi-Fi telemetry is stale; refresh the RSSI source before attributing disconnects."
+          : disconnected.length && weakWifi.length
+            ? "Current disconnects overlap weak Wi-Fi evidence; investigate AP coverage, roaming, and packet loss first."
+            : disconnected.length
+              ? "RDS reports disconnected AMRs without matching fresh weak-RSSI evidence; inspect FleetManager sockets and AP/controller logs."
+              : "RDS currently reports the fleet connected; continue monitoring for intermittent drops.";
+        return { plant: target, generatedAt: new Date().toISOString(), rdsTimestamp: core?.data?.create_on || "unknown", total: robots.length, connected: connected.length, disconnected, averageDelay: delays.length ? Math.round(delays.reduce((sum, value) => sum + value, 0) / delays.length) : 0, maximumDelay: delays.length ? Math.max(...delays) : 0, weakWifi, staleWifi, staleWifiDetails, wifiRows: wifiRows.length, worstHistory, conclusion };
+      }));
+      setConnectivityReports(reports);
+      setConnectivityReportStatus(`Generated ${reports.length} current plant report${reports.length === 1 ? "" : "s"}.`);
+      downloadConnectivityReport(reports);
+    } catch (error) {
+      setConnectivityReportStatus(`Report failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setBusy(""); }
+  }
+  function downloadConnectivityReport(reports = connectivityReports) {
+    const lines = reports.flatMap((report) => [
+      `DRISHTI RDS & Wi-Fi Health Report - ${report.plant}`,
+      `Generated: ${new Date(report.generatedAt).toLocaleString()}`,
+      `RDS timestamp: ${formatMaybeTime(report.rdsTimestamp)}`,
+      `Fleet: ${report.connected}/${report.total} connected`,
+      `Disconnected: ${report.disconnected.join(", ") || "None"}`,
+      `RDS delay: ${report.averageDelay} ms average / ${report.maximumDelay} ms maximum`,
+      `Fresh weak Wi-Fi: ${report.weakWifi.join(", ") || "None detected"}`,
+      `Stale Wi-Fi telemetry: ${report.staleWifi}/${report.wifiRows}`,
+      `Stale/last-known AMRs: ${report.staleWifiDetails.join(", ") || "None"}`,
+      `Highest disconnect history: ${report.worstHistory.join("; ") || "None recorded"}`,
+      `Assessment: ${report.conclusion}`,
+      "",
+    ]);
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `drishti-rds-wifi-health-${plantFilter.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${localDateKey()}.txt`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
   const currentUser = "admin";
   async function toggleZone(zone: BadZone) {
     const zoneId = zoneApiId(zone);
@@ -1069,6 +1212,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
     if (id === "health") setActiveReportDrilldown("health");
     if (id === "risk") setActiveReportDrilldown("risk");
     if (id === "worst-area") scrollToWorstZone();
+    if (id === "diagnostic") void generateConnectivityReport();
   }
   function toggleTimelineSeverity(severity: Severity) {
     setTimelineSeverities((current) => ({ ...current, [severity]: !current[severity] }));
@@ -1121,7 +1265,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
       if (!state.sceneMaps[plant]) {
         await fetchSceneMap(plant).catch((error) => setScanStatus(`Recording ${plant}: confidence saved, but map pull failed: ${error instanceof Error ? error.message : String(error)}`));
       }
-      mergeImport(normalized, "heatmap");
+      mergeImport(normalized, "heatmap", true);
       const sampleCount = buildConfidenceSamples(normalized.summary.plant, normalized.amrs, normalized.points, state.sceneMaps[plant]?.md5 || normalized.summary.sceneMd5).length;
       const targetName = scanTargetAmr || normalized.amrs[0]?.name || "";
       const target = normalized.amrs.find((amr) => amr.name === targetName);
@@ -1209,7 +1353,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
     if (selectedScanTime && keys.has(`${selectedImportPlant}|${selectedScanTime}`)) setSelectedScanTime("");
     setScanStatus(`Deleted ${keys.size} visible saved confidence scans.`);
   }
-  function mergeImport(normalized: NormalizedRds, nextView: View = "dashboard") {
+  function mergeImport(normalized: NormalizedRds, nextView: View = "dashboard", captureScan = false) {
     setState((current) => {
       const importedAmrs = applyIpOverrides(normalized.amrs, current.ipOverrides || []);
       return {
@@ -1218,7 +1362,9 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
       wifiPoints: current.wifiPoints.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.points),
       logs: current.logs.filter((item) => item.plant !== normalized.summary.plant).concat(normalized.logs),
       badZones: current.badZones.filter((item) => item.plant !== normalized.summary.plant).concat(deriveBadZones(importedAmrs, normalized.points)),
-      confidenceSamples: mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(normalized.summary.plant, importedAmrs, normalized.points, current.sceneMaps[normalized.summary.plant]?.md5 || normalized.summary.sceneMd5)),
+      confidenceSamples: captureScan
+        ? mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(normalized.summary.plant, importedAmrs, normalized.points, current.sceneMaps[normalized.summary.plant]?.md5 || normalized.summary.sceneMd5))
+        : current.confidenceSamples || [],
       rdsImportNote: `Imported ${normalized.summary.robots} ${normalized.summary.plant} AMRs from RDS core (${normalized.summary.createdOn}). Disconnected: ${normalized.summary.disconnected}. Model MD5: ${normalized.summary.modelMd5}. Scene MD5: ${normalized.summary.sceneMd5}.`,
       discovery: current.discovery.map((item) => item.point.includes("AMR ") || item.point.includes("RDS ") ? { ...item, status: "Available", source: "Go RDS proxy", gap: `Updated from ${normalized.summary.plant} core feed` } : item)
       };
@@ -1314,11 +1460,20 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
   }
   async function pullSceneMap(plant = heatmapPlant) {
     if (!plant) return;
-    setBusy(`Pulling ${plant} map`);
+    setBusy(`Pulling ${plant} map and AMRs`);
     try {
-      await fetchSceneMap(plant);
+      const connection = connections.find((item) => item.plant === plant);
+      if (!connection) throw new Error(`No RDS connection configured for ${plant}`);
+      const [sceneMap, coreResponse] = await Promise.all([
+        fetchSceneMap(plant),
+        fetch(rdsProxyUrl(plant, "core", true, plant)),
+      ]);
+      if (!coreResponse.ok) throw new Error((await coreResponse.json()).error || coreResponse.statusText);
+      mergeImport(normalizeRdsCoreResponse(await coreResponse.json(), plant, connection), "heatmap");
       setSelectedMapVersion("");
+      setSelectedImportPlant(plant);
       setView("heatmap");
+      setState((current) => ({ ...current, sceneMaps: { ...current.sceneMaps, [plant]: sceneMap } }));
     } catch (error) {
       setState((current) => ({ ...current, rdsImportNote: `Map pull failed: ${error instanceof Error ? error.message : String(error)}` }));
     } finally { setBusy(""); }
@@ -1521,7 +1676,9 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
           ...current,
           wifiPoints: nextWifiPoints,
           amrs: nextAmrs,
-          confidenceSamples: mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(plant, nextAmrs, nextWifiPoints, current.sceneMaps[plant]?.md5)),
+          confidenceSamples: scanRecording
+            ? mergeConfidenceSamples(current.confidenceSamples || [], buildConfidenceSamples(plant, nextAmrs, nextWifiPoints, current.sceneMaps[plant]?.md5))
+            : current.confidenceSamples || [],
           discovery: current.discovery.map((item) => item.point === "Wi-Fi RSSI" ? { ...item, status: result.ok ? "Available" : "Partial", source: sourceLabel, command: isTPLinkSource(source.method) ? "TP-Link DS wireless tables" : source.method === "SNMP" ? "SNMP wireless telemetry" : "RDS basic_info.ip + SSH Wi-Fi command detection", gap: result.message } : item)
         };
       });
@@ -1603,21 +1760,22 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
           <div className="threshold-note">{discoveryStatus}</div>
           <div className="table-wrap"><table className="discovery-signal-table"><thead><tr>{discoveryColumns.map((column) => <th key={column.key}><button className="sortable-header" type="button" onClick={() => toggleDiscoverySort(column.key)}><span>{column.label}</span><small>{discoverySort.key === column.key ? discoverySort.direction.toUpperCase() : "SORT"}</small></button></th>)}</tr></thead><tbody>
             {sortedDiscoveryRows.length ? sortedDiscoveryRows.map((row) => {
-              const rssiTier = rssiSignalTier(row.rssi_dbm);
-              const snrTier = snrSignalTier(row.snr_db);
-              const deadZone = hasRealRssi(row.rssi_dbm) && (row.rssi_dbm as number) <= -80;
-              return <tr key={`${row.plant}-${row.amr}`} className={deadZone ? "dead-zone-row" : ""}>
+              const stale = wifiReadingIsStale(row);
+              const rssiTier = stale ? "none" : rssiSignalTier(row.rssi_dbm);
+              const snrTier = stale ? "none" : snrSignalTier(row.snr_db);
+              const deadZone = !stale && hasRealRssi(row.rssi_dbm) && (row.rssi_dbm as number) <= -80;
+              return <tr key={`${row.plant}-${row.amr}`} className={stale ? "stale-signal-row" : deadZone ? "dead-zone-row" : ""}>
                 <td><strong>{row.amr}</strong>{deadZone && <span className="dead-zone-pill">Dead Zone Risk</span>}</td>
                 <td>{row.plant}</td>
                 <td>{badge(row.rds_status || "Not reported")}</td>
-                <td><span className={`signal-cell signal-${rssiTier}`}><SignalBarsIcon bars={signalBarsForRssi(row.rssi_dbm)} tier={rssiTier} /><strong>{rssiDisplay(row.rssi_dbm)}</strong><small>{signalLabel(row.rssi_dbm)}</small></span></td>
+                <td><span className={`signal-cell signal-${rssiTier}`}><SignalBarsIcon bars={stale ? 0 : signalBarsForRssi(row.rssi_dbm)} tier={rssiTier} /><strong>{rssiDisplay(row.rssi_dbm)}</strong><small>{stale ? "Stale / last known" : signalLabel(row.rssi_dbm)}</small></span></td>
                 <td><span className={`snr-pill signal-${snrTier}`}>{typeof row.snr_db === "number" && Number.isFinite(row.snr_db) ? `${row.snr_db} dB` : "No SNR"}</span></td>
                 <td>{row.ap_name || "not reported"}</td>
                 <td>{row.band_24ghz || (row.band === "2.4 GHz" ? row.band : "not captured")}</td>
                 <td>{row.band_5ghz || (row.band === "5 GHz" ? row.band : "not captured")}</td>
                 <td>{row.channel || "not reported"}</td>
-                <td>{formatMaybeTime(row.last_seen)}</td>
-                <td>{row.source || "RDS"}</td>
+                <td>{formatMaybeTime(row.last_seen)}<small className={stale ? "stale-age" : "fresh-age"}>{wifiAgeLabel(row.last_seen)}</small></td>
+                <td>{row.source || "RDS"}{stale && <small className="stale-age">Cached / not live</small>}</td>
               </tr>;
             }) : <tr><td colSpan={discoveryColumns.length}>No Discovery rows yet. Pull RDS data or configure the Go RSSI fallback environment variables.</td></tr>}
           </tbody></table></div>

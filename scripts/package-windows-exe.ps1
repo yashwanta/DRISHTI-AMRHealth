@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.6.1',
+    [string]$Version = '0.6.2',
     [string]$OutputDir = 'dist',
     [string]$PodmanVersion = '5.8.3'
 )

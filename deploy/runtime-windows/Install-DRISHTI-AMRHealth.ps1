@@ -101,7 +101,18 @@ if (-not $SkipLLMKey) {
 
 & (Join-Path $InstallRoot 'Start-DRISHTI-AMRHealth.ps1') -InstallRoot $InstallRoot
 
+$taskName = 'DRISHTI AMR Health - Automatic Startup'
+$startScript = Join-Path $InstallRoot 'Start-DRISHTI-AMRHealth.ps1'
+$taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$taskAction = New-ScheduledTaskAction `
+    -Execute (Join-Path $PSHOME 'powershell.exe') `
+    -Argument ("-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallRoot `"{1}`"" -f $startScript, $InstallRoot)
+$taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+$taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force | Out-Null
+
 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
 $shortcutPath = Join-Path $desktop 'DRISHTI AMR Health.url'
 Set-Content -LiteralPath $shortcutPath -Value "[InternetShortcut]`r`nURL=http://localhost:$HostPort`r`n" -Encoding ASCII
-Write-Host "Installation complete. Desktop shortcut created." -ForegroundColor Green
+Write-Host "Installation complete. Desktop shortcut and automatic startup task created." -ForegroundColor Green

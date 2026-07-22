@@ -13,7 +13,7 @@ separate from SiteOps.
 
 Download the current offline Windows installer from the official release page:
 
-**[Download DRISHTI AMR Health v0.6.1](https://github.com/yashwanta/DRISHTI-AMRHealth/releases/tag/v0.6.1)**
+**[Download DRISHTI AMR Health v0.6.2](https://github.com/yashwanta/DRISHTI-AMRHealth/releases/tag/v0.6.2)**
 
 The Windows x64 EXE contains:
 
@@ -24,7 +24,7 @@ The Windows x64 EXE contains:
 
 ### Windows installation
 
-1. Download `DRISHTI-AMRHealth-Setup-0.6.1-Windows-x64.exe` and its `.sha256`
+1. Download `DRISHTI-AMRHealth-Setup-0.6.2-Windows-x64.exe` and its `.sha256`
    file from the release page.
 2. Verify the EXE checksum if required by your organization.
 3. Run the EXE as Administrator.
@@ -32,6 +32,10 @@ The Windows x64 EXE contains:
 5. Allow a Windows restart if Podman needs to enable WSL 2 or virtualization
    features.
 6. Open **[http://localhost:8099](http://localhost:8099)**.
+
+The installer starts Podman, PostgreSQL, and DRISHTI immediately, verifies the
+application health endpoint, and registers an automatic startup task for the
+installing Windows account so the complete runtime returns after later logons.
 
 The current installer is not Authenticode-signed, so Windows SmartScreen may
 display `Unknown publisher`. Verify that the file came from the release page and
@@ -43,7 +47,7 @@ The source-free Linux package is intended for a server that users can reach on
 the plant network. Build the package from a trusted release workstation:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-runtime-linux.ps1 -Version 0.6.1
+powershell -ExecutionPolicy Bypass -File .\scripts\package-runtime-linux.ps1 -Version 0.6.2
 ```
 
 Copy the resulting `.tar.gz` to the plant server, extract it, and run:
