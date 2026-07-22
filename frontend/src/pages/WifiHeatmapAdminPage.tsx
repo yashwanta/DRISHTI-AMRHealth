@@ -178,13 +178,15 @@ function parseRobots(payload: any): Robot[] {
     .map((item: any) => {
       const r = item.rbk_report || {};
       const speed = Math.hypot(Number(r.vx) || 0, Number(r.vy) || 0);
+      const orderState = String(item.current_order?.state || "").toUpperCase();
+      const activeOrder = ["RUNNING", "EXECUTING", "MOVING", "GOING"].includes(orderState);
       return {
         name: item.uuid || item.vehicle_id || item.current_order?.vehicle || "",
         x: Number(r.x),
         y: Number(r.y),
         heading: Number.isFinite(Number(r.angle)) ? Number(r.angle) : undefined,
         speed,
-        moving: speed > 0.01 || Math.abs(Number(r.w) || 0) > 0.01,
+        moving: speed > 0.01 || Math.abs(Number(r.w) || 0) > 0.01 || activeOrder,
         connected: Number(item.connection_status) !== 0,
         mapVersion: data.scene_md5 || "unknown",
         timestamp: data.create_on || new Date().toISOString(),
@@ -767,12 +769,17 @@ export default function WifiHeatmapAdminPage() {
     await Promise.all([reloadHeat(), reloadSessions()]);
   };
   const b = scene?.bounds;
-  const robotBounds = focusRobots && robots.length
+  const selectedRobotNames = new Set(selectedAmrs.map((name) => name.toLowerCase()));
+  const focusedRobots = focusRobots && selectedRobotNames.size
+    ? robots.filter((robot) => selectedRobotNames.has(robot.name.toLowerCase()))
+    : robots;
+  const displayedRobots = focusRobots ? focusedRobots : robots;
+  const robotBounds = focusRobots && focusedRobots.length
     ? {
-        minX: Math.min(...robots.map((robot) => robot.x)),
-        maxX: Math.max(...robots.map((robot) => robot.x)),
-        minY: Math.min(...robots.map((robot) => robot.y)),
-        maxY: Math.max(...robots.map((robot) => robot.y)),
+        minX: Math.min(...focusedRobots.map((robot) => robot.x)),
+        maxX: Math.max(...focusedRobots.map((robot) => robot.x)),
+        minY: Math.min(...focusedRobots.map((robot) => robot.y)),
+        maxY: Math.max(...focusedRobots.map((robot) => robot.y)),
       }
     : undefined;
   const viewBounds = robotBounds
@@ -1046,7 +1053,7 @@ export default function WifiHeatmapAdminPage() {
         ))}
         <label className="flex gap-1 font-semibold text-cyan-300">
           <input type="checkbox" checked={focusRobots} onChange={(event) => setFocusRobots(event.target.checked)} />
-          Focus AMRs ({robots.filter((robot) => !robot.moving).length} parked)
+          Focus selected ({focusedRobots.filter((robot) => robot.moving).length} moving / {focusedRobots.filter((robot) => !robot.moving).length} parked)
         </label>
         <label>
           opacity{" "}
@@ -1285,7 +1292,7 @@ export default function WifiHeatmapAdminPage() {
                     {p.name}
                   </text>
                 ))}
-            {robots.map((robot) => {
+            {displayedRobots.map((robot) => {
               const signal = liveRobotStatus(robot);
               return (
                 <g key={`robot-${robot.name}`} transform={`translate(${robot.x} ${-robot.y})`}>
