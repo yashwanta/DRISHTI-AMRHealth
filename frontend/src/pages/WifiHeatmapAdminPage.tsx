@@ -770,6 +770,8 @@ function WifiSurveyWorkspace({
             {
               ...buildPoint(name, active.id, live.robots, live.wifi, activeScene),
               timestamp: capturedAt,
+              position_timestamp: capturedAt,
+              wifi_timestamp: capturedAt,
             },
           );
           if (result.saved) wifiAdded++;
