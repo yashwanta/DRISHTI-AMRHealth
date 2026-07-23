@@ -8,7 +8,7 @@ import {
   ChevronRight, X, Clock, TrendingDown, MapPin, Sparkles, Loader2,
   Download, FileText, Calendar
 } from 'lucide-react'
-import { getAMRFleet, getRdsPlants, getAMRTimeline, getAMRSummary, getAMRBadZones } from '../api/client'
+import { getAMRFleet, getRdsPlants, getAMRTimeline, getAMRSummary, getAMRBadZones, getAMRBatteryHistory } from '../api/client'
 import type { AMRStatus, AMRDropEvent, AMRSummary, TimeRange } from '../api/client'
 import { exportCSV, exportPrintPDF, esc, humanDuration } from '../utils/export'
 
@@ -791,6 +791,14 @@ function BadZonesPanel({ plant, timeRange, onPickLocation, activeLocation }: {
 type FilterStatus = 'all' | 'error' | 'warning' | 'ok' | 'unknown'
 type ViewMode = 'table' | 'cards'
 
+function localDayRange(daysAgo: number) {
+  const start = new Date()
+  start.setDate(start.getDate() - daysAgo)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setHours(23, 59, 59, 999)
+  return { from: start.toISOString(), to: end.toISOString() }
+}
 
 export default function AMRFleetPage() {
   const nav = useNavigate()
@@ -816,6 +824,7 @@ export default function AMRFleetPage() {
   // Location filter set by clicking a bad-zone row (robots that dropped there).
   const [locFilter, setLocFilter]       = useState('')
   const [locRobots, setLocRobots]       = useState<Set<string>>(new Set())
+  const [batteryRange, setBatteryRange] = useState(() => localDayRange(1))
 
   function pickLocation(loc: string, robots: string[]) {
     if (loc === '') {
@@ -851,6 +860,40 @@ export default function AMRFleetPage() {
     queryFn: () => getAMRFleet(activePlant),
     refetchInterval: 30_000,
   })
+
+  const { data: batteryHistory = [], isLoading: batteryHistoryLoading } = useQuery({
+    queryKey: ['amr-battery-history', activePlant, batteryRange.from, batteryRange.to],
+    queryFn: () => getAMRBatteryHistory({
+      plant: activePlant || undefined,
+      from: batteryRange.from,
+      to: batteryRange.to,
+    }),
+    refetchInterval: 60_000,
+  })
+
+  const batteryReport = useMemo(() => {
+    const grouped = new Map<string, typeof batteryHistory>()
+    for (const sample of batteryHistory) {
+      const key = `${sample.plant}|${sample.amr}`
+      grouped.set(key, [...(grouped.get(key) || []), sample])
+    }
+    return Array.from(grouped.values()).map(samples => {
+      const chronological = [...samples].sort((a, b) => a.captured_at.localeCompare(b.captured_at))
+      const levels = chronological.map(s => s.battery_level).filter((v): v is number => v != null)
+      const temps = chronological.map(s => s.battery_temp_c).filter((v): v is number => v != null)
+      const latest = chronological[chronological.length - 1]
+      return {
+        plant: latest.plant,
+        amr: latest.amr,
+        start: levels[0],
+        end: levels[levels.length - 1],
+        min: levels.length ? Math.min(...levels) : undefined,
+        maxTemp: temps.length ? Math.max(...temps) : undefined,
+        state: latest.battery_state,
+        samples: chronological.length,
+      }
+    }).sort((a, b) => a.plant.localeCompare(b.plant) || a.amr.localeCompare(b.amr))
+  }, [batteryHistory])
 
   // The backend already merges the live RDS Core roster/status with historical
   // connectivity metrics, so keep the page aligned with that single source.
@@ -960,6 +1003,24 @@ export default function AMRFleetPage() {
         { key: 'last_issue', header: 'Last issue' },
       ],
       `amr-fleet-${activePlant || 'all-plants'}-${format(new Date(), 'yyyy-MM-dd')}.csv`,
+    )
+  }
+
+  function exportBatteryCSV() {
+    if (!batteryReport.length) return
+    exportCSV(
+      batteryReport,
+      [
+        { key: 'plant', header: 'Plant' },
+        { key: 'amr', header: 'AMR' },
+        { key: 'start', header: 'Starting battery (%)' },
+        { key: 'end', header: 'Ending battery (%)' },
+        { key: 'min', header: 'Minimum battery (%)' },
+        { key: 'maxTemp', header: 'Maximum temperature (C)' },
+        { key: 'state', header: 'Latest state' },
+        { key: 'samples', header: 'Samples' },
+      ],
+      `amr-battery-report-${format(new Date(batteryRange.from), 'yyyy-MM-dd')}.csv`,
     )
   }
 
@@ -1123,6 +1184,75 @@ export default function AMRFleetPage() {
 
         {/* Summary */}
         {amrs.length > 0 && <SummaryBar amrs={amrs} selected={selected} />}
+
+        {/* Persisted battery telemetry report */}
+        <section className="rounded-xl border border-gray-700 bg-gray-800/50 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-700">
+            <div>
+              <h2 className="text-sm font-semibold text-white">Battery History Report</h2>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Recorded automatically from RDS Core while DRISHTI is running
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setBatteryRange(localDayRange(0))}
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-gray-600 bg-gray-800 text-gray-300 hover:text-white"
+              >
+                Today
+              </button>
+              <button
+                onClick={() => setBatteryRange(localDayRange(1))}
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-indigo-600 bg-indigo-700 text-white"
+              >
+                Yesterday
+              </button>
+              <button
+                onClick={exportBatteryCSV}
+                disabled={!batteryReport.length}
+                className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border border-gray-600 bg-gray-700 text-gray-200 disabled:opacity-40"
+              >
+                <Download size={11} /> Export report
+              </button>
+            </div>
+          </div>
+          {batteryHistoryLoading ? (
+            <div className="px-4 py-5 text-xs text-gray-400">Loading battery history...</div>
+          ) : batteryReport.length === 0 ? (
+            <div className="px-4 py-5 text-xs text-amber-300">
+              No stored samples for this period. Collection begins after this update is installed; it cannot recreate readings from before installation.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-900/60 text-gray-400">
+                  <tr>
+                    <th className="px-4 py-2 text-left">Plant / AMR</th>
+                    <th className="px-4 py-2 text-right">Start</th>
+                    <th className="px-4 py-2 text-right">End</th>
+                    <th className="px-4 py-2 text-right">Minimum</th>
+                    <th className="px-4 py-2 text-right">Max temp</th>
+                    <th className="px-4 py-2 text-left">Latest state</th>
+                    <th className="px-4 py-2 text-right">Samples</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-700">
+                  {batteryReport.map(row => (
+                    <tr key={`${row.plant}|${row.amr}`} className="text-gray-200">
+                      <td className="px-4 py-2"><span className="text-gray-500">{row.plant}</span> / {row.amr}</td>
+                      <td className="px-4 py-2 text-right">{row.start == null ? '—' : `${row.start.toFixed(0)}%`}</td>
+                      <td className="px-4 py-2 text-right">{row.end == null ? '—' : `${row.end.toFixed(0)}%`}</td>
+                      <td className="px-4 py-2 text-right">{row.min == null ? '—' : `${row.min.toFixed(0)}%`}</td>
+                      <td className="px-4 py-2 text-right">{row.maxTemp == null ? '—' : `${row.maxTemp.toFixed(1)}°C`}</td>
+                      <td className="px-4 py-2">{row.state || '—'}</td>
+                      <td className="px-4 py-2 text-right">{row.samples}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         {/* States */}
         {isLoading && (

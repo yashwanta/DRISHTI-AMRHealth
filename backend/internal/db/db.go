@@ -362,6 +362,26 @@ CREATE INDEX IF NOT EXISTS idx_rsr_server ON robot_status_records(server_id);
 -- Dedup key: one transition per (server, uuid, started_on). Re-syncs upsert.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_rsr_server_uuid_started ON robot_status_records(server_id, uuid, started_on);
 
+-- Minute-level battery telemetry sampled from the live RDS Core robot roster.
+-- The unique minute bucket keeps the 30-second Fleet refresh from creating
+-- duplicate samples while retaining enough detail for daily reports.
+CREATE TABLE IF NOT EXISTS amr_battery_history (
+    id            BIGSERIAL PRIMARY KEY,
+    plant         TEXT NOT NULL,
+    amr           TEXT NOT NULL,
+    captured_at   TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', NOW()),
+    battery_level DOUBLE PRECISION,
+    battery_temp_c DOUBLE PRECISION,
+    battery_state TEXT NOT NULL DEFAULT '',
+    source         TEXT NOT NULL DEFAULT 'rds_core'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_amr_battery_history_minute
+    ON amr_battery_history(plant, amr, captured_at);
+CREATE INDEX IF NOT EXISTS idx_amr_battery_history_scope_time
+    ON amr_battery_history(plant, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_amr_battery_history_amr_time
+    ON amr_battery_history(plant, amr, captured_at DESC);
+
 -- Durable, synchronized Wi-Fi survey data. Map identifiers intentionally remain
 -- text because current RDS deployments expose MD5/version identifiers rather
 -- than a shared numeric map catalogue.

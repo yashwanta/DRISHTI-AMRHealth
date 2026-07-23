@@ -33,7 +33,7 @@ type WifiTestResult = { ok: boolean; status?: string; method: string; host: stri
 type WifiDiscoverResult = { ok: boolean; status?: string; plant: string; amr: string; host: string; command?: string; message: string; output?: string; rssi?: number; ssid?: string; quality?: WifiPoint["quality"] | "Unknown"; snr_db?: number; ap_name?: string; band?: string; band_24ghz?: string; band_5ghz?: string; channel?: string };
 type WifiDiscoverResponse = { ok: boolean; message: string; results?: WifiDiscoverResult[] | null };
 type DiscoveryAMR = { plant: string; amr: string; rssi_dbm?: number | null; snr_db?: number | null; ap_name?: string; band?: string; band_24ghz?: string; band_5ghz?: string; channel?: string; last_seen?: string; source?: string; rds_status?: string };
-type DiscoverySortKey = "amr" | "plant" | "rds_status" | "rssi_dbm" | "snr_db" | "ap_name" | "band_24ghz" | "band_5ghz" | "channel" | "last_seen" | "source";
+type DiscoverySortKey = "amr" | "plant" | "rds_status" | "rssi_dbm" | "snr_db" | "ap_name" | "band" | "band_24ghz" | "band_5ghz" | "channel" | "last_seen" | "source";
 type SavedSceneMap = { id: string; name: string; createdAt: string; scene: SceneMap };
 type AppState = {
   amrs: AMR[]; wifiPoints: WifiPoint[]; logs: LogEntry[]; badZones: BadZone[]; sceneMaps: Record<string, SceneMap>;
@@ -132,6 +132,18 @@ function wifiAgeLabel(lastSeen?: string) {
   if (minutes < 60) return `${minutes} min old`;
   const hours = Math.floor(minutes / 60), remainder = minutes % 60;
   return `${hours}h ${remainder}m old`;
+}
+function connectedWifiBand(row: DiscoveryAMR): "2.4 GHz" | "5 GHz" | "Unknown" {
+  const reported = String(row.band || "").toLowerCase();
+  if (reported.includes("2.4") || reported.includes("2g")) return "2.4 GHz";
+  if (reported.includes("5")) return "5 GHz";
+  const channel = Number.parseInt(String(row.channel || ""), 10);
+  if (Number.isFinite(channel)) return channel >= 1 && channel <= 14 ? "2.4 GHz" : "5 GHz";
+  const has24 = Boolean(row.band_24ghz && !row.band_24ghz.includes("00-00-00-00-00-00"));
+  const has5 = Boolean(row.band_5ghz && !row.band_5ghz.includes("00-00-00-00-00-00"));
+  if (has24 && !has5) return "2.4 GHz";
+  if (has5 && !has24) return "5 GHz";
+  return "Unknown";
 }
 function liveRdsActivityLabel(item: any) {
   if (Number(item?.connection_status) === 0 || item?.undispatchable_reason?.disconnect === true) return "Offline";
@@ -748,6 +760,11 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
   }
   useEffect(() => { if (view === "discovery" || view === "wifi-signal") void loadDiscoverySignals(); }, [view, plantFilter]);
   useEffect(() => {
+    if (view !== "wifi-signal") return;
+    const timer = window.setInterval(() => { void loadDiscoverySignals(); }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [view, plantFilter, connections]);
+  useEffect(() => {
     if (!liveRssiEnabled || view !== "discovery") {
       setLiveRssiCountdown(30);
       return;
@@ -800,7 +817,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
       }));
       const stale = rows.filter((item) => wifiReadingIsStale(item)).length;
       setDiscoveryRows(rows);
-      setDiscoveryStatus(`${payload.message || `Loaded ${rows.length} Discovery rows.`} Fresh ${rows.length - stale}; stale/last-known ${stale}. Readings older than 5 minutes are not treated as current signal quality.`);
+      setDiscoveryStatus(`${payload.message || `Loaded ${rows.length} Discovery rows.`} Fresh ${rows.length - stale}; stale/last-known ${stale}. Last-known signal colors stay visible; age remains marked separately. Auto-refreshes every minute.`);
     } catch (error) {
       setDiscoveryRows([]);
       setDiscoveryStatus(`Discovery signal load failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -872,6 +889,7 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
     { key: "rssi_dbm", label: "RSSI" },
     { key: "snr_db", label: "SNR" },
     { key: "ap_name", label: "AP" },
+    { key: "band", label: "Connected Band" },
     { key: "band_24ghz", label: "2.4 GHz Band" },
     { key: "band_5ghz", label: "5 GHz Band" },
     { key: "channel", label: "Channel" },
@@ -1761,16 +1779,18 @@ export default function AmrHealthApp({ embedded = false }: { embedded?: boolean 
           <div className="table-wrap"><table className="discovery-signal-table"><thead><tr>{discoveryColumns.map((column) => <th key={column.key}><button className="sortable-header" type="button" onClick={() => toggleDiscoverySort(column.key)}><span>{column.label}</span><small>{discoverySort.key === column.key ? discoverySort.direction.toUpperCase() : "SORT"}</small></button></th>)}</tr></thead><tbody>
             {sortedDiscoveryRows.length ? sortedDiscoveryRows.map((row) => {
               const stale = wifiReadingIsStale(row);
-              const rssiTier = stale ? "none" : rssiSignalTier(row.rssi_dbm);
-              const snrTier = stale ? "none" : snrSignalTier(row.snr_db);
+              const rssiTier = rssiSignalTier(row.rssi_dbm);
+              const snrTier = snrSignalTier(row.snr_db);
+              const connectedBand = connectedWifiBand(row);
               const deadZone = !stale && hasRealRssi(row.rssi_dbm) && (row.rssi_dbm as number) <= -80;
-              return <tr key={`${row.plant}-${row.amr}`} className={stale ? "stale-signal-row" : deadZone ? "dead-zone-row" : ""}>
+              return <tr key={`${row.plant}-${row.amr}`} className={deadZone ? "dead-zone-row" : ""}>
                 <td><strong>{row.amr}</strong>{deadZone && <span className="dead-zone-pill">Dead Zone Risk</span>}</td>
                 <td>{row.plant}</td>
                 <td>{badge(row.rds_status || "Not reported")}</td>
-                <td><span className={`signal-cell signal-${rssiTier}`}><SignalBarsIcon bars={stale ? 0 : signalBarsForRssi(row.rssi_dbm)} tier={rssiTier} /><strong>{rssiDisplay(row.rssi_dbm)}</strong><small>{stale ? "Stale / last known" : signalLabel(row.rssi_dbm)}</small></span></td>
+                <td><span className={`signal-cell signal-${rssiTier}`}><SignalBarsIcon bars={signalBarsForRssi(row.rssi_dbm)} tier={rssiTier} /><strong>{rssiDisplay(row.rssi_dbm)}</strong><small>{stale ? `${signalLabel(row.rssi_dbm)} · last known` : signalLabel(row.rssi_dbm)}</small></span></td>
                 <td><span className={`snr-pill signal-${snrTier}`}>{typeof row.snr_db === "number" && Number.isFinite(row.snr_db) ? `${row.snr_db} dB` : "No SNR"}</span></td>
                 <td>{row.ap_name || "not reported"}</td>
+                <td><span className={`wifi-band-pill ${connectedBand === "2.4 GHz" ? "band-24" : connectedBand === "5 GHz" ? "band-5" : "band-unknown"}`}>{connectedBand}</span></td>
                 <td>{row.band_24ghz || (row.band === "2.4 GHz" ? row.band : "not captured")}</td>
                 <td>{row.band_5ghz || (row.band === "5 GHz" ? row.band : "not captured")}</td>
                 <td>{row.channel || "not reported"}</td>

@@ -115,6 +115,7 @@ type SurveySession = {
   id: number;
   plant_id: string;
   map_id: string;
+  map_version: string;
   amr_id: string;
   status: string;
   sample_count: number;
@@ -217,6 +218,7 @@ export default function WifiHeatmapAdminPage() {
       wifiCount: number;
     }>(),
     [visibleSessionID, setVisibleSessionID] = useState<number>(),
+    [showAllHistory, setShowAllHistory] = useState(false),
     [metric, setMetric] = useState("rssi"),
     [aggregation, setAggregation] = useState("average"),
     [grid, setGrid] = useState(3),
@@ -617,6 +619,16 @@ export default function WifiHeatmapAdminPage() {
   useEffect(() => {
     void reloadSessions().catch(() => undefined);
   }, [reloadSessions]);
+  useEffect(() => {
+    if (recording || showAllHistory || !plant || !scene) return;
+    const latest = sessions.find(
+      (item) =>
+        item.plant_id === plant &&
+        item.map_id === scene.md5 &&
+        item.map_version === effectiveMapVersion,
+    );
+    setVisibleSessionID(latest?.id);
+  }, [sessions, plant, scene?.md5, effectiveMapVersion, recording?.id, showAllHistory]);
   const saveOne = async () => {
     try {
       if (mismatch) throw new Error(mismatch);
@@ -754,6 +766,7 @@ export default function WifiHeatmapAdminPage() {
       recordingSceneRef.current = live.scene;
       lastRef.current.clear();
       setRecording({ id: s.id, started: Date.now(), count: 0, wifiCount: 0 });
+      setShowAllHistory(false);
       setVisibleSessionID(s.id);
       setCells([]);
       setRaw([]);
@@ -867,7 +880,7 @@ export default function WifiHeatmapAdminPage() {
               onClick={start}
             >
               <Play size={16} />
-              Start Scan Recording
+              Start New Clean Survey
             </button>
           )}
         </div>
@@ -880,6 +893,35 @@ export default function WifiHeatmapAdminPage() {
           <span>{mismatch || status}</span>
         </div>
       )}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-cyan-900/70 bg-cyan-950/20 px-3 py-2">
+        <div className="text-xs text-cyan-100">
+          <strong>{showAllHistory ? "Viewing all survey history" : visibleSessionID ? `Viewing survey #${visibleSessionID}` : "Clean map — no saved survey selected"}</strong>
+          <span className="ml-2 text-cyan-300/70">Use a second browser tab to record another plant at the same time.</span>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className={`rounded px-3 py-1.5 text-xs ${!showAllHistory ? "bg-cyan-700 text-white" : "bg-slate-700 text-gray-200"}`}
+            onClick={() => {
+              setShowAllHistory(false);
+              const latest = sessions.find((item) => item.plant_id === plant && item.map_id === scene?.md5);
+              setVisibleSessionID(latest?.id);
+            }}
+          >
+            Latest Survey
+          </button>
+          <button
+            type="button"
+            className={`rounded px-3 py-1.5 text-xs ${showAllHistory ? "bg-cyan-700 text-white" : "bg-slate-700 text-gray-200"}`}
+            onClick={() => {
+              setShowAllHistory(true);
+              setVisibleSessionID(undefined);
+            }}
+          >
+            All History
+          </button>
+        </div>
+      </div>
       <section className="bg-gray-900 border border-gray-800 rounded p-4 space-y-3">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label className="text-xs text-gray-400">
@@ -1356,17 +1398,17 @@ export default function WifiHeatmapAdminPage() {
       </section>
       <section className="bg-gray-900 border border-gray-800 rounded p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><h2 className="font-semibold">Survey Reports</h2><p className="text-xs text-gray-400">Stopped scans remain here; their saved points stay visible on the map above.</p></div>
+          <div><h2 className="font-semibold">Survey Reports</h2><p className="text-xs text-gray-400">Each scan is separate. Use View to display only that survey; All History is optional.</p></div>
           <button type="button" className="rounded bg-slate-700 px-3 py-1.5 text-xs" onClick={() => void reloadSessions()}>Refresh reports</button>
         </div>
         <div className="overflow-auto">
           <table className="w-full text-xs text-left">
-            <thead className="text-gray-400"><tr><th className="p-2">Session</th><th className="p-2">AMRs</th><th className="p-2">Started</th><th className="p-2">Stopped</th><th className="p-2">Route points</th><th className="p-2">Wi-Fi samples</th><th className="p-2">Status</th></tr></thead>
+            <thead className="text-gray-400"><tr><th className="p-2">Session</th><th className="p-2">AMRs</th><th className="p-2">Started</th><th className="p-2">Stopped</th><th className="p-2">Route points</th><th className="p-2">Wi-Fi samples</th><th className="p-2">Status</th><th className="p-2">Map view</th></tr></thead>
             <tbody>
               {sessions.filter((item) => item.plant_id === plant).map((item) => (
-                <tr key={item.id} className="border-t border-gray-800"><td className="p-2">#{item.id}</td><td className="p-2">{item.amr_id}</td><td className="p-2">{new Date(item.started_at).toLocaleString()}</td><td className="p-2">{item.stopped_at ? new Date(item.stopped_at).toLocaleString() : "—"}</td><td className="p-2">{item.route_count}</td><td className="p-2">{item.sample_count}</td><td className="p-2 capitalize">{item.status}</td></tr>
+                <tr key={item.id} className={`border-t border-gray-800 ${visibleSessionID === item.id && !showAllHistory ? "bg-cyan-950/30" : ""}`}><td className="p-2">#{item.id}</td><td className="p-2">{item.amr_id}</td><td className="p-2">{new Date(item.started_at).toLocaleString()}</td><td className="p-2">{item.stopped_at ? new Date(item.stopped_at).toLocaleString() : "—"}</td><td className="p-2">{item.route_count}</td><td className="p-2">{item.sample_count}</td><td className="p-2 capitalize">{item.status}</td><td className="p-2"><button type="button" className="rounded bg-cyan-800 px-2.5 py-1 text-white" onClick={() => { setShowAllHistory(false); setVisibleSessionID(item.id); }}>View</button></td></tr>
               ))}
-              {!sessions.some((item) => item.plant_id === plant) && <tr><td className="p-3 text-gray-400" colSpan={7}>No survey reports for this plant yet.</td></tr>}
+              {!sessions.some((item) => item.plant_id === plant) && <tr><td className="p-3 text-gray-400" colSpan={8}>No survey reports for this plant yet.</td></tr>}
             </tbody>
           </table>
         </div>

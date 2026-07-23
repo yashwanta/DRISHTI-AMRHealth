@@ -265,6 +265,10 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
 .signal-poor { color: #EF4444; border-color: rgba(239, 68, 68, 0.55); background: rgba(239, 68, 68, 0.12); }
 .signal-none { color: #94a3b8; border-color: rgba(148, 163, 184, 0.35); background: rgba(148, 163, 184, 0.09); }
 .snr-pill, .dead-zone-pill { display: inline-flex; align-items: center; border: 1px solid var(--line-soft); border-radius: 999px; padding: 5px 9px; font-weight: 800; font-size: 12px; }
+.wifi-band-pill { display: inline-flex; align-items: center; min-width: 72px; justify-content: center; border: 1px solid; border-radius: 999px; padding: 5px 9px; font-weight: 900; font-size: 12px; white-space: nowrap; }
+.wifi-band-pill.band-24 { color: #fef08a; border-color: rgba(234, 179, 8, 0.55); background: rgba(234, 179, 8, 0.15); }
+.wifi-band-pill.band-5 { color: #bae6fd; border-color: rgba(14, 165, 233, 0.58); background: rgba(14, 165, 233, 0.16); }
+.wifi-band-pill.band-unknown { color: #cbd5e1; border-color: rgba(148, 163, 184, 0.4); background: rgba(148, 163, 184, 0.1); }
 .dead-zone-pill { margin-left: 8px; color: #fecaca; border-color: rgba(239, 68, 68, 0.65); background: rgba(239, 68, 68, 0.16); }
 .dead-zone-row { background: rgba(239, 68, 68, 0.07); }
 .stale-signal-row { background: rgba(100, 116, 139, 0.08); color: #94a3b8; }

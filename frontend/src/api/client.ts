@@ -286,6 +286,25 @@ export const getAMRFleet = (plant?: string) =>
     .get<AMRStatus[]>("/amr/fleet", { params: plant ? { plant } : undefined })
     .then((r) => r.data);
 
+export interface AMRBatterySample {
+  plant: string;
+  amr: string;
+  captured_at: string;
+  battery_level?: number;
+  battery_temp_c?: number;
+  battery_state: string;
+  source: string;
+}
+export const getAMRBatteryHistory = (params: {
+  plant?: string;
+  amr?: string;
+  from: string;
+  to: string;
+}) =>
+  api
+    .get<AMRBatterySample[]>("/amr/battery-history", { params })
+    .then((r) => r.data);
+
 // AMR reconnect timeline — one entry per disconnect/reconnect outage.
 export interface AMRDropEvent {
   plant: string;

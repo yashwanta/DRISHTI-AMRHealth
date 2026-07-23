@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -414,7 +415,100 @@ func (h *AMRHandler) fetchCoreRobotStatuses(plant string) map[string]coreRobotFl
 	if len(merged) == 0 {
 		return nil
 	}
+	h.recordBatteryStatuses(merged)
 	return merged
+}
+
+// recordBatteryStatuses stores at most one live sample per robot per minute.
+// Fleet is polled every 30 seconds, so the database unique index and upsert
+// provide continuous history without duplicating refreshes.
+func (h *AMRHandler) recordBatteryStatuses(statuses map[string]coreRobotFleetStatus) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, st := range statuses {
+		if st.BatteryLevel == nil && st.BatteryTempC == nil && st.BatteryState == "" {
+			continue
+		}
+		_, err := h.db.Exec(ctx, `
+			INSERT INTO amr_battery_history
+				(plant, amr, captured_at, battery_level, battery_temp_c, battery_state)
+			VALUES ($1, $2, date_trunc('minute', NOW()), $3, $4, $5)
+			ON CONFLICT (plant, amr, captured_at) DO UPDATE SET
+				battery_level = EXCLUDED.battery_level,
+				battery_temp_c = EXCLUDED.battery_temp_c,
+				battery_state = EXCLUDED.battery_state`,
+			st.Plant, st.Name, st.BatteryLevel, st.BatteryTempC, st.BatteryState)
+		if err != nil {
+			log.Printf("store battery telemetry for %s/%s: %v", st.Plant, st.Name, err)
+		}
+	}
+}
+
+type AMRBatterySample struct {
+	Plant        string    `json:"plant"`
+	AMR          string    `json:"amr"`
+	CapturedAt   time.Time `json:"captured_at"`
+	BatteryLevel *float64  `json:"battery_level,omitempty"`
+	BatteryTempC *float64  `json:"battery_temp_c,omitempty"`
+	BatteryState string    `json:"battery_state"`
+	Source       string    `json:"source"`
+}
+
+// BatteryHistory returns persisted RDS Core battery telemetry for reports.
+func (h *AMRHandler) BatteryHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	plant := strings.TrimSpace(q.Get("plant"))
+	amr := normaliseAMRName(q.Get("amr"))
+	from, to := time.Now().Add(-24*time.Hour), time.Now()
+	if raw := q.Get("from"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			from = parsed
+		} else if parsed, err := time.Parse("2006-01-02", raw); err == nil {
+			from = parsed
+		} else {
+			jsonError(w, "invalid from date", http.StatusBadRequest)
+			return
+		}
+	}
+	if raw := q.Get("to"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			to = parsed
+		} else if parsed, err := time.Parse("2006-01-02", raw); err == nil {
+			to = parsed.Add(24*time.Hour - time.Nanosecond)
+		} else {
+			jsonError(w, "invalid to date", http.StatusBadRequest)
+			return
+		}
+	}
+	limit := 20000
+	if raw := q.Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 100000 {
+			limit = n
+		}
+	}
+	rows, err := h.db.Query(r.Context(), `
+		SELECT plant, amr, captured_at, battery_level, battery_temp_c, battery_state, source
+		FROM amr_battery_history
+		WHERE ($1 = '' OR plant = $1)
+		  AND ($2 = '' OR amr = $2)
+		  AND captured_at >= $3 AND captured_at <= $4
+		ORDER BY captured_at DESC, plant, amr
+		LIMIT $5`, plant, amr, from, to, limit)
+	if err != nil {
+		jsonError(w, "could not load battery history", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := make([]AMRBatterySample, 0)
+	for rows.Next() {
+		var sample AMRBatterySample
+		if err := rows.Scan(&sample.Plant, &sample.AMR, &sample.CapturedAt,
+			&sample.BatteryLevel, &sample.BatteryTempC, &sample.BatteryState, &sample.Source); err != nil {
+			continue
+		}
+		out = append(out, sample)
+	}
+	jsonOK(w, out)
 }
 
 // fetchCoreRobotIPs returns only the RDS Core robot IP map for callers that do

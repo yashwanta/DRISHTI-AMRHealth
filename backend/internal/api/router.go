@@ -123,6 +123,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, native *NativeHandlers) htt
 		r.Get("/rds/logs", rwH.ListLogs)
 
 		r.Get("/amr/fleet", amrH.FleetStatus)
+		r.Get("/amr/battery-history", amrH.BatteryHistory)
 		r.Get("/amr/timeline", amrH.Timeline)
 		r.Get("/amr/robot", amrH.RobotSummary)
 		r.Get("/amr/badzones", amrH.BadZones)
