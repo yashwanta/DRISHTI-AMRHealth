@@ -70,8 +70,15 @@ type Raw = {
   bssid: string;
   amr_id: string;
   timestamp: string;
+  wifi_timestamp: string;
+  position_timestamp: string;
+  rds_connected: boolean;
   disconnect_event: boolean;
   roam_event: boolean;
+  channel: number;
+  band: string;
+  latency_ms?: number;
+  source_id: string;
 };
 type RoutePoint = {
   session_id: number;
@@ -123,6 +130,19 @@ type SurveySession = {
   started_at: string;
   stopped_at?: string;
 };
+type SurveyWorkspaceSummary = {
+  plant: string;
+  recording: boolean;
+  sessionID?: number;
+  elapsed: number;
+  routeCount: number;
+  wifiCount: number;
+};
+type SurveyWorkspaceProps = {
+  workspaceID: number;
+  initialPlantIndex: number;
+  onSummary: (workspaceID: number, summary: SurveyWorkspaceSummary) => void;
+};
 
 const slug = (v: string) =>
   v
@@ -142,7 +162,38 @@ const color = (rssi: number, unknown = false) =>
           ? "#facc15"
           : rssi >= -75
             ? "#f97316"
-            : "#dc2626";
+      : "#dc2626";
+const WIFI_SAMPLE_FRESH_SECONDS = 300;
+const wifiSampleAgeSeconds = (point: Raw) =>
+  Math.max(
+    0,
+    Math.round(
+      Math.abs(
+        new Date(point.timestamp).getTime() -
+          new Date(point.wifi_timestamp).getTime(),
+      ) / 1000,
+    ),
+  );
+const wifiAgeDescription = (point: Raw) => {
+  const seconds = wifiSampleAgeSeconds(point);
+  if (seconds < 60) return `${seconds}s old`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m old`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m old`;
+};
+const connectivityDiagnosis = (point: Raw) => {
+  const stale = wifiSampleAgeSeconds(point) > WIFI_SAMPLE_FRESH_SECONDS;
+  if (point.roam_event)
+    return `AP roam detected; RDS ${point.rds_connected ? "connected" : "disconnected"}`;
+  if (point.disconnect_event && stale)
+    return "Likely AMR-side network failure: RDS lost and RSSI is stale";
+  if (point.disconnect_event)
+    return "RDS Core connection lost; Wi-Fi reading was still current";
+  if (!point.rds_connected && stale)
+    return "RDS disconnected; only stale/last-known Wi-Fi evidence is available";
+  if (!point.rds_connected)
+    return "RDS disconnected; Wi-Fi measurement remained current";
+  return stale ? "RDS connected; RSSI is stale/last known" : "RDS and Wi-Fi telemetry current";
+};
 function parseScene(payload: any): Scene {
   const logical = payload?.data?.scene?.areas?.[0]?.logicalMap;
   if (!logical) throw new Error("RDS scene has no logical map");
@@ -201,7 +252,11 @@ function parseRobots(payload: any): Robot[] {
     );
 }
 
-export default function WifiHeatmapAdminPage() {
+function WifiSurveyWorkspace({
+  workspaceID,
+  initialPlantIndex,
+  onSummary,
+}: SurveyWorkspaceProps) {
   const [connections, setConnections] = useState<Connection[]>([]),
     [plant, setPlant] = useState(""),
     [scene, setScene] = useState<Scene>(),
@@ -251,14 +306,27 @@ export default function WifiHeatmapAdminPage() {
     mapSvgRef = useRef<SVGSVGElement | null>(null);
   recordingRef.current = recording;
   useEffect(() => {
+    onSummary(workspaceID, {
+      plant,
+      recording: Boolean(recording),
+      sessionID: recording?.id,
+      elapsed,
+      routeCount: recording?.count || 0,
+      wifiCount: recording?.wifiCount || 0,
+    });
+  }, [workspaceID, onSummary, plant, recording?.id, recording?.count, recording?.wifiCount, elapsed]);
+  useEffect(() => {
     fetch("/api/connections")
       .then((r) => r.json())
       .then((v: Connection[]) => {
         setConnections(v);
-        if (v[0]) setPlant(v[0].plant);
+        if (v[0])
+          setPlant(
+            v[Math.min(initialPlantIndex, v.length - 1)]?.plant || v[0].plant,
+          );
       })
       .catch((e) => setStatus(String(e)));
-  }, []);
+  }, [initialPlantIndex]);
   const saveMapChoice = useCallback(
     (nextScene: Scene, name: string, source: SavedMap["source"]) => {
       const key = `drishti-wifi-survey-maps:${plant}`;
@@ -702,8 +770,6 @@ export default function WifiHeatmapAdminPage() {
             {
               ...buildPoint(name, active.id, live.robots, live.wifi, activeScene),
               timestamp: capturedAt,
-              position_timestamp: capturedAt,
-              wifi_timestamp: capturedAt,
             },
           );
           if (result.saved) wifiAdded++;
@@ -833,6 +899,28 @@ export default function WifiHeatmapAdminPage() {
       }, new Map<string, RoutePoint[]>())
       .entries(),
   ];
+  const routeDisconnects = routeGroups.flatMap(([, points]) => {
+    const ordered = [...points].sort((a, b) =>
+      a.timestamp.localeCompare(b.timestamp),
+    );
+    return ordered.filter(
+      (point, index) =>
+        !point.connected && (index === 0 || ordered[index - 1].connected),
+    );
+  });
+  const nearestWifiEvidence = (point: RoutePoint) => {
+    const candidates = raw.filter((sample) => sample.amr_id === point.amr_id);
+    if (!candidates.length) return undefined;
+    return [...candidates].sort(
+      (a, b) =>
+        Math.abs(
+          new Date(a.timestamp).getTime() - new Date(point.timestamp).getTime(),
+        ) -
+        Math.abs(
+          new Date(b.timestamp).getTime() - new Date(point.timestamp).getTime(),
+        ),
+    )[0];
+  };
   const liveRobotStatus = (robot: Robot) => {
     if (!robot.connected) return { label: "Disconnected", fill: "#dc2626" };
     const reading = wifi.find(
@@ -899,14 +987,6 @@ export default function WifiHeatmapAdminPage() {
           <span className="ml-2 text-cyan-300/70">Use a second browser tab to record another plant at the same time.</span>
         </div>
         <div className="flex gap-2">
-          <button
-            type="button"
-            className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
-            onClick={() => window.open(window.location.href, "_blank", "noopener,noreferrer")}
-            title="Open another independent Wi-Fi Survey page for a different plant"
-          >
-            Open Second Plant Survey Tab
-          </button>
           <button
             type="button"
             className={`rounded px-3 py-1.5 text-xs ${!showAllHistory ? "bg-cyan-700 text-white" : "bg-slate-700 text-gray-200"}`}
@@ -1199,7 +1279,7 @@ export default function WifiHeatmapAdminPage() {
                         >
                           <title>
                             {latest.amr_id} route · {points.length} points ·
-                            {routeSignal.label} · nearest {latest.nearest_location || "unknown"}
+                            {routeSignal.label} · RDS {latest.connected ? "connected" : "disconnected"} · nearest {latest.nearest_location || "unknown"}
                           </title>
                         </circle>
                       )}
@@ -1258,13 +1338,41 @@ export default function WifiHeatmapAdminPage() {
                   strokeWidth=".12"
                 >
                   <title>
-                    {p.amr_id} {p.rssi_dbm} dBm
+                    {p.amr_id} · {p.rssi_dbm} dBm · {p.band || "unknown band"} ch {p.channel || "?"} · AP {p.bssid || "unknown"} · RSSI {wifiAgeDescription(p)} · RDS {p.rds_connected ? "connected" : "disconnected"} · {connectivityDiagnosis(p)}
                   </title>
                 </circle>
               ))}
             {layers.events &&
+              routeDisconnects.map((point, i) => {
+                const wifiEvidence = nearestWifiEvidence(point);
+                const evidenceDelta = wifiEvidence
+                  ? Math.round(
+                      Math.abs(
+                        new Date(wifiEvidence.timestamp).getTime() -
+                          new Date(point.timestamp).getTime(),
+                      ) / 1000,
+                    )
+                  : Infinity;
+                const currentWifi =
+                  wifiEvidence &&
+                  evidenceDelta <= WIFI_SAMPLE_FRESH_SECONDS &&
+                  wifiSampleAgeSeconds(wifiEvidence) <= WIFI_SAMPLE_FRESH_SECONDS;
+                const diagnosis = currentWifi
+                  ? "RDS Core connection lost; synchronized Wi-Fi evidence remained current"
+                  : "Likely AMR-side network failure: RDS lost and no current synchronized Wi-Fi evidence";
+                return (
+                  <g key={`rd${i}`} transform={`translate(${point.x} ${-point.y})`}>
+                    <line x1="-.7" y1="-.7" x2=".7" y2=".7" stroke="#ef4444" strokeWidth=".3" />
+                    <line x1="-.7" y1=".7" x2=".7" y2="-.7" stroke="#ef4444" strokeWidth=".3" />
+                    <title>
+                      {point.amr_id} · {diagnosis} · {wifiEvidence ? `nearest RSSI ${wifiEvidence.rssi_dbm} dBm, AP ${wifiEvidence.bssid}, Wi-Fi ${wifiAgeDescription(wifiEvidence)}` : "no synchronized RSSI sample"} · nearest {point.nearest_location || "unknown"} · {new Date(point.timestamp).toLocaleString()}
+                    </title>
+                  </g>
+                );
+              })}
+            {layers.events &&
               raw
-                .filter((p) => p.disconnect_event || p.roam_event)
+                .filter((p) => p.roam_event)
                 .map((p, i) =>
                   p.disconnect_event ? (
                     <g key={`e${i}`} transform={`translate(${p.x} ${-p.y})`}>
@@ -1285,7 +1393,7 @@ export default function WifiHeatmapAdminPage() {
                         strokeWidth=".3"
                       />
                       <title>
-                        {p.amr_id} · Wi-Fi disconnect · {p.rssi_dbm} dBm · AP {p.bssid || "unknown"} · {new Date(p.timestamp).toLocaleString()}
+                        {p.amr_id} · {connectivityDiagnosis(p)} · RSSI {p.rssi_dbm} dBm ({wifiAgeDescription(p)}) · AP {p.bssid || "unknown"} · {p.band || "unknown band"} ch {p.channel || "?"} · latency {p.latency_ms ?? "unknown"} ms · source {p.source_id || "unknown"} · {new Date(p.timestamp).toLocaleString()}
                       </title>
                     </g>
                   ) : (
@@ -1299,7 +1407,7 @@ export default function WifiHeatmapAdminPage() {
                       strokeWidth=".3"
                     >
                       <title>
-                        {p.amr_id} · AP roam · {p.rssi_dbm} dBm · AP {p.bssid || "unknown"} · {new Date(p.timestamp).toLocaleString()}
+                        {p.amr_id} · {connectivityDiagnosis(p)} · RSSI {p.rssi_dbm} dBm ({wifiAgeDescription(p)}) · AP {p.bssid || "unknown"} · {p.band || "unknown band"} ch {p.channel || "?"} · {new Date(p.timestamp).toLocaleString()}
                       </title>
                     </circle>
                   ),
@@ -1424,7 +1532,8 @@ export default function WifiHeatmapAdminPage() {
       <footer className="text-xs text-gray-500 flex flex-wrap gap-4">
         <span className="text-green-500">● Good connection</span>
         <span className="text-orange-500">● Weak (&lt; -70 dBm)</span>
-        <span className="text-red-500">● Disconnected</span>
+        <span className="text-red-500">× RDS/robot connection lost</span>
+        <span className="text-purple-400">○ AP roam</span>
         <span>Green ≥ -55</span>
         <span>Lime -56…-65</span>
         <span>Yellow -66…-70</span>
@@ -1432,9 +1541,112 @@ export default function WifiHeatmapAdminPage() {
         <span>Red &lt; -75</span>
         <span className="flex gap-1">
           <WifiOff size={13} />
-          Gray = unknown/low samples
+          Gray = unknown/low samples · stale RSSI is not saved as current
         </span>
       </footer>
+    </div>
+  );
+}
+
+export default function WifiHeatmapAdminPage() {
+  const [workspaceIDs, setWorkspaceIDs] = useState([1, 2]);
+  const [activeWorkspaceID, setActiveWorkspaceID] = useState(1);
+  const [summaries, setSummaries] = useState<
+    Record<number, SurveyWorkspaceSummary>
+  >({});
+  const updateSummary = useCallback(
+    (workspaceID: number, summary: SurveyWorkspaceSummary) => {
+      setSummaries((current) => {
+        const previous = current[workspaceID];
+        if (
+          previous &&
+          previous.plant === summary.plant &&
+          previous.recording === summary.recording &&
+          previous.sessionID === summary.sessionID &&
+          previous.elapsed === summary.elapsed &&
+          previous.routeCount === summary.routeCount &&
+          previous.wifiCount === summary.wifiCount
+        )
+          return current;
+        return { ...current, [workspaceID]: summary };
+      });
+    },
+    [],
+  );
+  const activeSurveys = workspaceIDs
+    .map((id) => ({ id, ...summaries[id] }))
+    .filter((item) => item.recording);
+
+  return (
+    <div className="flex min-h-full flex-col bg-gray-950 text-gray-100">
+      <section className="sticky top-0 z-30 border-b border-cyan-900/70 bg-gray-950/95 px-5 py-3 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            {workspaceIDs.map((id, index) => {
+              const summary = summaries[id];
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveWorkspaceID(id)}
+                  className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                    activeWorkspaceID === id
+                      ? "border-cyan-500 bg-cyan-900/50 text-white"
+                      : "border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500"
+                  }`}
+                >
+                  <span className="flex items-center gap-2 font-semibold">
+                    {summary?.recording && (
+                      <i className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                    )}
+                    {summary?.plant || `Plant Survey ${index + 1}`}
+                  </span>
+                  <small className="mt-0.5 block text-[10px] text-gray-400">
+                    {summary?.recording
+                      ? `Recording #${summary.sessionID} · ${summary.elapsed}s`
+                      : "Not recording"}
+                  </small>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              className="rounded-lg border border-dashed border-gray-600 px-3 py-2 text-xs text-gray-300 hover:border-cyan-500 hover:text-white"
+              onClick={() => {
+                const nextID = Math.max(...workspaceIDs) + 1;
+                setWorkspaceIDs((current) => [...current, nextID]);
+                setActiveWorkspaceID(nextID);
+              }}
+            >
+              + Add Plant Survey
+            </button>
+          </div>
+          <div className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-xs">
+            <strong className={activeSurveys.length ? "text-emerald-300" : "text-gray-300"}>
+              {activeSurveys.length} active plant survey{activeSurveys.length === 1 ? "" : "s"}
+            </strong>
+            {activeSurveys.length > 0 && (
+              <span className="ml-2 text-gray-400">
+                {activeSurveys
+                  .map(
+                    (item) =>
+                      `${item.plant}: ${item.routeCount} route / ${item.wifiCount} Wi-Fi`,
+                  )
+                  .join(" · ")}
+              </span>
+            )}
+          </div>
+        </div>
+      </section>
+      {workspaceIDs.map((id, index) => (
+        <div key={id} hidden={activeWorkspaceID !== id}>
+          <WifiSurveyWorkspace
+            workspaceID={id}
+            initialPlantIndex={index}
+            onSummary={updateSummary}
+          />
+        </div>
+      ))}
     </div>
   );
 }

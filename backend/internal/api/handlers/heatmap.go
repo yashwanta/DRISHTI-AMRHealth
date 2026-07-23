@@ -347,15 +347,22 @@ type cell struct {
 	AMRs            []string  `json:"contributing_amrs"`
 }
 type rawPoint struct {
-	X          float64   `json:"x"`
-	Y          float64   `json:"y"`
-	RSSI       float64   `json:"rssi_dbm"`
-	SNR        *float64  `json:"snr_db"`
-	BSSID      string    `json:"bssid"`
-	AMR        string    `json:"amr_id"`
-	Timestamp  time.Time `json:"timestamp"`
-	Disconnect bool      `json:"disconnect_event"`
-	Roam       bool      `json:"roam_event"`
+	X                 float64   `json:"x"`
+	Y                 float64   `json:"y"`
+	RSSI              float64   `json:"rssi_dbm"`
+	SNR               *float64  `json:"snr_db"`
+	BSSID             string    `json:"bssid"`
+	AMR               string    `json:"amr_id"`
+	Timestamp         time.Time `json:"timestamp"`
+	WifiTimestamp     time.Time `json:"wifi_timestamp"`
+	PositionTimestamp time.Time `json:"position_timestamp"`
+	Connected         bool      `json:"rds_connected"`
+	Disconnect        bool      `json:"disconnect_event"`
+	Roam              bool      `json:"roam_event"`
+	Channel           int       `json:"channel"`
+	Band              string    `json:"band"`
+	LatencyMS         *float64  `json:"latency_ms"`
+	Source            string    `json:"source_id"`
 }
 type routePoint struct {
 	SessionID       int64     `json:"session_id"`
@@ -440,7 +447,7 @@ func (h *HeatmapHandler) Query(w http.ResponseWriter, r *http.Request) {
 			add("timestamp <= $%d", t)
 		}
 	}
-	rows, err := h.db.Query(r.Context(), `SELECT x,y,rssi_dbm,snr_db,bssid,amr_id,timestamp,disconnect_event,roam_event FROM wifi_scan_points WHERE `+where+` ORDER BY timestamp`, args...)
+	rows, err := h.db.Query(r.Context(), `SELECT x,y,rssi_dbm,snr_db,bssid,amr_id,timestamp,wifi_timestamp,position_timestamp,connected,disconnect_event,roam_event,channel,band,latency_ms,source_id FROM wifi_scan_points WHERE `+where+` ORDER BY timestamp`, args...)
 	if err != nil {
 		jsonError(w, err.Error(), 500)
 		return
@@ -453,12 +460,20 @@ func (h *HeatmapHandler) Query(w http.ResponseWriter, r *http.Request) {
 		var rssi int
 		var snr *float64
 		var bssid, amr string
-		var ts time.Time
-		var disc, roam bool
-		if rows.Scan(&x, &y, &rssi, &snr, &bssid, &amr, &ts, &disc, &roam) != nil {
+		var ts, wifiTS, positionTS time.Time
+		var connected, disc, roam bool
+		var channel int
+		var band, source string
+		var latency *float64
+		if rows.Scan(&x, &y, &rssi, &snr, &bssid, &amr, &ts, &wifiTS, &positionTS, &connected, &disc, &roam, &channel, &band, &latency, &source) != nil {
 			continue
 		}
-		points = append(points, rawPoint{X: x, Y: y, RSSI: float64(rssi), SNR: snr, BSSID: bssid, AMR: amr, Timestamp: ts, Disconnect: disc, Roam: roam})
+		points = append(points, rawPoint{
+			X: x, Y: y, RSSI: float64(rssi), SNR: snr, BSSID: bssid, AMR: amr,
+			Timestamp: ts, WifiTimestamp: wifiTS, PositionTimestamp: positionTS,
+			Connected: connected, Disconnect: disc, Roam: roam, Channel: channel,
+			Band: band, LatencyMS: latency, Source: source,
+		})
 		value := float64(rssi)
 		if metric == "snr" {
 			if snr == nil {
