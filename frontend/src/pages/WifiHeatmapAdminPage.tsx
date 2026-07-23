@@ -901,6 +901,14 @@ export default function WifiHeatmapAdminPage() {
         <div className="flex gap-2">
           <button
             type="button"
+            className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
+            onClick={() => window.open(window.location.href, "_blank", "noopener,noreferrer")}
+            title="Open another independent Wi-Fi Survey page for a different plant"
+          >
+            Open Second Plant Survey Tab
+          </button>
+          <button
+            type="button"
             className={`rounded px-3 py-1.5 text-xs ${!showAllHistory ? "bg-cyan-700 text-white" : "bg-slate-700 text-gray-200"}`}
             onClick={() => {
               setShowAllHistory(false);
