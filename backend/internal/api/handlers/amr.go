@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"context"
@@ -234,10 +234,13 @@ type AMRStatus struct {
 	// Authoritative per-robot data from t_robotstatusrecord (RDS Core MySQL).
 	// Populated when the 'rds_robot_status' collection has run. Human-readable
 	// status label, odometer, and whether the robot is currently connected.
-	StatusLabel string  `json:"status_label"` // e.g. "Idle", "Moving", "Offline"
-	Odo         float64 `json:"odo"`          // cumulative meters
-	TodayOdo    float64 `json:"today_odo"`    // meters today
-	DataSource  string  `json:"data_source"`  // "rds_core" | "logs"
+	StatusLabel  string   `json:"status_label"`            // e.g. "Idle", "Moving", "Offline"
+	Odo          float64  `json:"odo"`                     // cumulative meters
+	TodayOdo     float64  `json:"today_odo"`               // meters today
+	BatteryLevel *float64 `json:"battery_level,omitempty"` // percent, 0-100
+	BatteryTempC *float64 `json:"battery_temp_c,omitempty"`
+	BatteryState string   `json:"battery_state,omitempty"`
+	DataSource   string   `json:"data_source"` // "rds_core" | "logs"
 }
 
 // robotStatusCodeLabel maps a Seer/SRC new_status code to a short human label.
@@ -450,6 +453,9 @@ func mergeCoreRobotStatus(fleet map[string]*AMRStatus, core map[string]coreRobot
 				existing.Odo = st.Odo
 			}
 			existing.TodayOdo = st.TodayOdo
+			existing.BatteryLevel = st.BatteryLevel
+			existing.BatteryTempC = st.BatteryTempC
+			existing.BatteryState = st.BatteryState
 			seenAt := coreRobotLastSeenAt(st)
 			if !seenAt.IsZero() && (existing.LastSeen == nil || seenAt.After(*existing.LastSeen)) {
 				existing.LastSeen = &seenAt
@@ -489,19 +495,22 @@ func mergeCoreRobotStatus(fleet map[string]*AMRStatus, core map[string]coreRobot
 		}
 		seenAt := coreRobotLastSeenAt(st)
 		s := &AMRStatus{
-			Name:        st.Name,
-			Plant:       st.Plant,
-			Status:      status,
-			LastIP:      st.IP,
-			LastMAC:     st.MAC,
-			LiveStatus:  liveStatus,
-			StatusCode:  st.ConnectionStatus,
-			StatusLabel: statusLabel,
-			Odo:         st.Odo,
-			TodayOdo:    st.TodayOdo,
-			LastSeen:    &seenAt,
-			LastIssue:   lastIssue,
-			DataSource:  "rds_core_live",
+			Name:         st.Name,
+			Plant:        st.Plant,
+			Status:       status,
+			LastIP:       st.IP,
+			LastMAC:      st.MAC,
+			LiveStatus:   liveStatus,
+			StatusCode:   st.ConnectionStatus,
+			StatusLabel:  statusLabel,
+			Odo:          st.Odo,
+			TodayOdo:     st.TodayOdo,
+			BatteryLevel: st.BatteryLevel,
+			BatteryTempC: st.BatteryTempC,
+			BatteryState: st.BatteryState,
+			LastSeen:     &seenAt,
+			LastIssue:    lastIssue,
+			DataSource:   "rds_core_live",
 		}
 		applyCoreOfflineFallback(s, st)
 		fleet[key] = s

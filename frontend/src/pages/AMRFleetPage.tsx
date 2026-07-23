@@ -61,7 +61,7 @@ function StatusIcon({ status }: { status: string }) {
 
 // ── Connectivity Table ─────────────────────────────────────────────────────────
 
-type SortKey = 'name' | 'status' | 'reconnect_count' | 'total_offline_sec' | 'worst_drop_sec' | 'disconnect_count' | 'last_seen' | 'today_odo'
+type SortKey = 'name' | 'status' | 'reconnect_count' | 'total_offline_sec' | 'worst_drop_sec' | 'disconnect_count' | 'last_seen' | 'today_odo' | 'battery_level' | 'battery_temp_c'
 
 function statusRank(s: string) {
   return s === 'error' ? 3 : s === 'warning' ? 2 : s === 'ok' ? 1 : 0
@@ -77,6 +77,20 @@ function fmtMeters(meters?: number | null): string {
   if (meters <= 0) return '0 m'
   if (meters < 1000) return `${Math.round(meters)} m`
   return `${(meters / 1000).toFixed(1)} km`
+}
+
+function batteryLevelTone(level?: number): string {
+  if (level === undefined) return 'text-gray-600'
+  if (level < 20) return 'text-red-300'
+  if (level < 35) return 'text-amber-300'
+  return 'text-green-300'
+}
+
+function batteryTempTone(temp?: number): string {
+  if (temp === undefined) return 'text-gray-600'
+  if (temp >= 55) return 'text-red-300'
+  if (temp >= 45) return 'text-amber-300'
+  return 'text-cyan-200'
 }
 
 function rdsState(amr: AMRStatus): string {
@@ -153,6 +167,9 @@ function ConnectivityTable({
             <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wide">MAC</th>
             <Th label="Status"         col="status" />
             <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wide">RDS State</th>
+            <Th label="Battery" col="battery_level" />
+            <Th label="Battery Temp" col="battery_temp_c" />
+            <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wide">Battery State</th>
             <Th label="Last Seen"      col="last_seen" />
             <Th label="Today Odo"      col="today_odo" />
             <Th label="TCP Reconnects" col="reconnect_count" />
@@ -199,6 +216,15 @@ function ConnectivityTable({
               </td>
               <td className="px-4 py-3 text-xs text-gray-300 whitespace-nowrap">
                 <span title={amr.status_code !== undefined ? `RDS code ${amr.status_code}` : undefined}>{rdsState(amr)}</span>
+              </td>
+              <td className={`px-4 py-3 text-xs font-semibold whitespace-nowrap ${batteryLevelTone(amr.battery_level)}`}>
+                {amr.battery_level === undefined ? '—' : `${Math.round(amr.battery_level)}%`}
+              </td>
+              <td className={`px-4 py-3 text-xs font-semibold whitespace-nowrap ${batteryTempTone(amr.battery_temp_c)}`}>
+                {amr.battery_temp_c === undefined ? '—' : `${amr.battery_temp_c.toFixed(1)} °C`}
+              </td>
+              <td className="px-4 py-3 text-xs text-gray-300 whitespace-nowrap">
+                {amr.battery_state || '—'}
               </td>
               <td className="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
                 {relTime(amr.last_seen)}
@@ -294,6 +320,18 @@ function AMRCard({
         <div className="min-w-0">
           <p className="text-[10px] uppercase text-gray-500">Today</p>
           <p className="truncate text-xs text-gray-300">{fmtMeters(amr.today_odo)}</p>
+        </div>
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase text-gray-500">Battery</p>
+          <p className={`truncate text-xs font-semibold ${batteryLevelTone(amr.battery_level)}`}>{amr.battery_level === undefined ? '—' : `${Math.round(amr.battery_level)}%`}</p>
+        </div>
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase text-gray-500">Temperature</p>
+          <p className={`truncate text-xs font-semibold ${batteryTempTone(amr.battery_temp_c)}`}>{amr.battery_temp_c === undefined ? '—' : `${amr.battery_temp_c.toFixed(1)} °C`}</p>
+        </div>
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase text-gray-500">Battery State</p>
+          <p className="truncate text-xs text-gray-300">{amr.battery_state || '—'}</p>
         </div>
       </div>
 
@@ -887,6 +925,9 @@ export default function AMRFleetPage() {
         last_mac: a.last_mac,
         rds_state: rdsState(a),
         status_code: a.status_code ?? '',
+        battery_level_percent: a.battery_level ?? '',
+        battery_temp_c: a.battery_temp_c ?? '',
+        battery_state: a.battery_state ?? '',
         today_odo: a.today_odo ?? '',
         odo: a.odo ?? '',
         data_source: a.data_source ?? '',
@@ -905,6 +946,9 @@ export default function AMRFleetPage() {
         { key: 'last_mac', header: 'MAC' },
         { key: 'rds_state', header: 'RDS state' },
         { key: 'status_code', header: 'RDS status code' },
+        { key: 'battery_level_percent', header: 'Battery (%)' },
+        { key: 'battery_temp_c', header: 'Battery temperature (C)' },
+        { key: 'battery_state', header: 'Battery state' },
         { key: 'today_odo', header: 'Today odometer' },
         { key: 'odo', header: 'Odometer' },
         { key: 'data_source', header: 'Data source' },

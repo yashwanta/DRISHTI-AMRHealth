@@ -47,6 +47,9 @@ type RobotCoreStatus struct {
 	MAC              string
 	Odo              float64
 	TodayOdo         float64
+	BatteryLevel     *float64
+	BatteryTempC     *float64
+	BatteryState     string
 	ConnectionStatus int
 	SeenAt           time.Time
 	LastReceivedAt   time.Time
@@ -564,12 +567,24 @@ func (c *Client) CoreRobotStatus() (map[string]RobotCoreStatus, error) {
 			IP string `json:"ip"`
 			// RDS Core /robotsStatus exposes the robot's network adapter MAC in
 			// basic_info.mac (some firmware variants use mac_address).
-			MAC         string `json:"mac"`
-			MACAddress  string `json:"mac_address"`
+			MAC        string `json:"mac"`
+			MACAddress string `json:"mac_address"`
 		} `json:"basic_info"`
 		RBKReport struct {
-			Odo        float64 `json:"odo"`
-			TodayOdo   float64 `json:"today_odo"`
+			Odo                  float64 `json:"odo"`
+			TodayOdo             float64 `json:"today_odo"`
+			BatteryLevel         any     `json:"battery_level"`
+			BatteryTemperature   any     `json:"battery_temperature"`
+			BatteryTemp          any     `json:"battery_temp"`
+			BatteryStatus        any     `json:"battery_status"`
+			Charging             any     `json:"charging"`
+			BatteryChargeCurrent any     `json:"battery_charge_current"`
+			Current              any     `json:"current"`
+			Battery              struct {
+				Level       any `json:"level"`
+				Temperature any `json:"temperature"`
+				Status      any `json:"status"`
+			} `json:"battery"`
 			ReceivedOn struct {
 				DataNsec any `json:"data_nsec"`
 				PubNsec  any `json:"pub_nsec"`
@@ -598,6 +613,25 @@ func (c *Client) CoreRobotStatus() (map[string]RobotCoreStatus, error) {
 		if lastReceivedAt.IsZero() {
 			lastReceivedAt = unixRobotStatusTime(row.RBKReport.ReceivedOn.PubNsec)
 		}
+		batteryLevel := firstNumeric(row.RBKReport.BatteryLevel, row.RBKReport.Battery.Level)
+		if batteryLevel != nil && *batteryLevel >= 0 && *batteryLevel <= 1 {
+			value := *batteryLevel * 100
+			batteryLevel = &value
+		}
+		batteryTemp := firstNumeric(row.RBKReport.BatteryTemperature, row.RBKReport.BatteryTemp, row.RBKReport.Battery.Temperature)
+		batteryState := firstText(row.RBKReport.BatteryStatus, row.RBKReport.Battery.Status)
+		if batteryState == "" {
+			chargeCurrent := firstNumeric(row.RBKReport.BatteryChargeCurrent, row.RBKReport.Current)
+			if anyBool(row.RBKReport.Charging) || (chargeCurrent != nil && *chargeCurrent > 0.1) {
+				batteryState = "Charging"
+			} else if chargeCurrent != nil && *chargeCurrent < -0.1 {
+				batteryState = "Discharging"
+			} else if row.RBKReport.Charging != nil {
+				batteryState = "Not charging"
+			} else if chargeCurrent != nil {
+				batteryState = "Idle"
+			}
+		}
 		out[name] = RobotCoreStatus{
 			UUID:             row.UUID,
 			VehicleID:        row.VehicleID,
@@ -605,12 +639,64 @@ func (c *Client) CoreRobotStatus() (map[string]RobotCoreStatus, error) {
 			MAC:              mac,
 			Odo:              row.RBKReport.Odo,
 			TodayOdo:         row.RBKReport.TodayOdo,
+			BatteryLevel:     batteryLevel,
+			BatteryTempC:     batteryTemp,
+			BatteryState:     batteryState,
 			ConnectionStatus: row.ConnectionStatus,
 			SeenAt:           seenAt,
 			LastReceivedAt:   lastReceivedAt,
 		}
 	}
 	return out, nil
+}
+
+func firstNumeric(values ...any) *float64 {
+	for _, raw := range values {
+		var value float64
+		var ok bool
+		switch typed := raw.(type) {
+		case float64:
+			value, ok = typed, true
+		case float32:
+			value, ok = float64(typed), true
+		case int:
+			value, ok = float64(typed), true
+		case json.Number:
+			value, _ = typed.Float64()
+			ok = true
+		case string:
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(typed, "%")), 64)
+			if err == nil {
+				value, ok = parsed, true
+			}
+		}
+		if ok {
+			return &value
+		}
+	}
+	return nil
+}
+
+func firstText(values ...any) string {
+	for _, raw := range values {
+		if value := strings.TrimSpace(fmt.Sprint(raw)); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	return ""
+}
+
+func anyBool(raw any) bool {
+	switch typed := raw.(type) {
+	case bool:
+		return typed
+	case string:
+		value, _ := strconv.ParseBool(strings.TrimSpace(typed))
+		return value
+	case float64:
+		return typed != 0
+	}
+	return false
 }
 
 func unixRobotStatusTime(raw any) time.Time {

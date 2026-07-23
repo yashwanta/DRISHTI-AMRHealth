@@ -411,6 +411,14 @@ func (h *HeatmapHandler) Query(w http.ResponseWriter, r *http.Request) {
 			add("amr_id=ANY($%d)", filtered)
 		}
 	}
+	if v := q.Get("session"); v != "" {
+		if sessionID, e := strconv.ParseInt(v, 10, 64); e == nil && sessionID > 0 {
+			add("session_id=$%d", sessionID)
+		} else {
+			jsonError(w, "session must be a positive integer", 400)
+			return
+		}
+	}
 	if v := q.Get("bssid"); v != "" {
 		add("bssid=$%d", v)
 	}
@@ -544,6 +552,12 @@ func (h *HeatmapHandler) Query(w http.ResponseWriter, r *http.Request) {
 	})
 	routeArgs := []any{plant, mapID, version}
 	routeWhere := `plant_id=$1 AND map_id=$2 AND map_version=$3`
+	if v := q.Get("session"); v != "" {
+		if sessionID, e := strconv.ParseInt(v, 10, 64); e == nil && sessionID > 0 {
+			routeArgs = append(routeArgs, sessionID)
+			routeWhere += fmt.Sprintf(" AND session_id=$%d", len(routeArgs))
+		}
+	}
 	if v := q.Get("amr"); v != "" {
 		filtered := []string{}
 		for _, amr := range strings.Split(v, ",") {

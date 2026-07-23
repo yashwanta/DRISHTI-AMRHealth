@@ -216,6 +216,7 @@ export default function WifiHeatmapAdminPage() {
       count: number;
       wifiCount: number;
     }>(),
+    [visibleSessionID, setVisibleSessionID] = useState<number>(),
     [metric, setMetric] = useState("rssi"),
     [aggregation, setAggregation] = useState("average"),
     [grid, setGrid] = useState(3),
@@ -591,6 +592,7 @@ export default function WifiHeatmapAdminPage() {
       aggregation_type: aggregation,
       grid_size: grid,
       ...(selectedAmrs.length ? { amr: selectedAmrs.join(",") } : {}),
+      ...(visibleSessionID ? { session: visibleSessionID } : {}),
     });
     setCells(data.cells || []);
     setRaw(data.points || []);
@@ -603,6 +605,7 @@ export default function WifiHeatmapAdminPage() {
     aggregation,
     grid,
     selectedAmrs,
+    visibleSessionID,
   ]);
   const reloadSessions = useCallback(async () => {
     const data = await listWifiHeatmapSessions();
@@ -751,6 +754,10 @@ export default function WifiHeatmapAdminPage() {
       recordingSceneRef.current = live.scene;
       lastRef.current.clear();
       setRecording({ id: s.id, started: Date.now(), count: 0, wifiCount: 0 });
+      setVisibleSessionID(s.id);
+      setCells([]);
+      setRaw([]);
+      setRoute([]);
       setStatus(
         `Recording session ${s.id} started for ${selectedAmrs.length} AMR${selectedAmrs.length === 1 ? "" : "s"}. Route positions record even when Wi-Fi is unavailable.`,
       );
@@ -1227,6 +1234,9 @@ export default function WifiHeatmapAdminPage() {
                         stroke="#ef4444"
                         strokeWidth=".3"
                       />
+                      <title>
+                        {p.amr_id} · Wi-Fi disconnect · {p.rssi_dbm} dBm · AP {p.bssid || "unknown"} · {new Date(p.timestamp).toLocaleString()}
+                      </title>
                     </g>
                   ) : (
                     <circle
@@ -1237,7 +1247,11 @@ export default function WifiHeatmapAdminPage() {
                       fill="none"
                       stroke="#a855f7"
                       strokeWidth=".3"
-                    />
+                    >
+                      <title>
+                        {p.amr_id} · AP roam · {p.rssi_dbm} dBm · AP {p.bssid || "unknown"} · {new Date(p.timestamp).toLocaleString()}
+                      </title>
+                    </circle>
                   ),
                 )}
             {layers.aps &&

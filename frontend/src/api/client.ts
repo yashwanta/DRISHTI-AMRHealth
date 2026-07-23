@@ -276,6 +276,9 @@ export interface AMRStatus {
   status_label?: string;
   odo?: number;
   today_odo?: number;
+  battery_level?: number;
+  battery_temp_c?: number;
+  battery_state?: string;
   data_source?: string;
 }
 export const getAMRFleet = (plant?: string) =>
